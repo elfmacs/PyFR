@@ -18,7 +18,7 @@
     else
     {
 % for i in range(nvars):
-        u[${i}] = NAN;
+        u[${i}] = nan("");
 % endfor
     }
 
