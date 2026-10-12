@@ -125,7 +125,8 @@ class BaseAdvectionSystem(BaseSystem):
 
         # Compute the transformed divergence of the corrected flux
         for l in k['eles/tdivtconf']:
-            ldeps = deps(l, 'eles/tdivtpcorf') + k['mpiint/comm_flux']
+            ldeps = deps(l, 'eles/tdivtpcorf', 'eles/tfluxdiff')
+            ldeps += k['mpiint/comm_flux']
             g_flux_div.add(l, deps=ldeps)
 
         # Obtain the physical divergence of the corrected flux
