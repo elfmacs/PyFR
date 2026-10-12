@@ -50,8 +50,12 @@ class TVDRK3Stepper(BaseExplicitStepper):
 
         # Third stage; r2 = -∇·f(r1);
         #              r1 = 1.0/3.0*r0 + 2.0/3.0*r1 + 2.0/3.0*dt*r2
+        #  The state weights are rounded to the working precision such that
+        #  they sum to exactly one; in single precision fl(2/3) + fl(1/3)
+        #  = 1 + 2^-25 which scales the conserved variables every step
         rhs(t + 0.5*dt, r1, r2)
-        add(2.0/3.0, r1, 1.0/3.0, r0, 2.0/3.0*dt, r2)
+        c23 = self.backend.fpdtype(2.0/3.0)
+        add(float(c23), r1, float(1 - c23), r0, 2.0/3.0*dt, r2)
 
         # Return the index of the bank containing u(t + dt)
         return r1
