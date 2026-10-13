@@ -6,7 +6,10 @@ Parameterises the interfaces with
 
 1. ``riemann-solver`` --- type of Riemann solver:
 
-    ``rusanov`` | ``hll`` | ``hllc`` | ``roe`` | ``roem`` | ``exact``
+    ``rusanov`` | ``hll`` | ``hllc`` | ``roe`` | ``roem`` | ``exact`` |
+    ``slau``
+
+    ``slau`` is the Simple Low-Dissipation AUSM flux.
 
 2. ``ldg-beta`` --- beta parameter used for LDG:
 
