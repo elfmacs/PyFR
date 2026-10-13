@@ -154,7 +154,7 @@ class NavierStokesSupInflowRecycleBCInters(NavierStokesBaseBCInters):
         if cfg.hasopt(cfgsect, 'file'):
             self.csv = CSVStream(cfg.get(cfgsect, 'file'),
                                  header='t,x_rec,ut_rec,rhow_rec,delta_rec,'
-                                        'ue_rec,gamma,zc,avg_T')
+                                        'ue_rec,gamma,zc,avg_T', nflush=1)
         else:
             self.csv = None
 
@@ -223,8 +223,13 @@ class NavierStokesSupInflowRecycleBCInters(NavierStokesBaseBCInters):
             self.uc = cfg.getfloat(sect, 'reflect-uc', 0.8)
             self.uinf = cfg.getfloat(sect, 'reflect-uinf', 1.0)
 
+        # The averaged recycle-plane state is only valid for the same plane
+        same_plane = (prevcfg is None or not prevcfg.hasopt(sect, 'x-rec') or
+                      prevcfg.getfloat(sect, 'x-rec') == cfg.getfloat(sect, 'x-rec'))
+
         n = 4*self.ny
-        if sdata is not None and len(sdata) == n + 6 and sdata[n + 2] > 0:
+        if (sdata is not None and len(sdata) == n + 6 and sdata[n + 2] > 0 and
+            same_plane):
             self.means = sdata[:n].reshape(4, self.ny).copy()
             self.tprev, self.t0, self.nupdates = sdata[n:n + 3]
             self.zc, self.t_switch, self.nevents = sdata[n + 3:n + 6]
