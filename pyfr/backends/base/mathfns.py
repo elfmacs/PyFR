@@ -1,4 +1,4 @@
-from math import factorial, gcd
+from math import factorial, floor, gcd, log
 
 import numpy as np
 from mako.template import Template
@@ -77,13 +77,22 @@ ${qual}static inline fpdtype_t _pyfr_pow_${r}_${q}(fpdtype_t x)
 _exp_tpl = Template('''\
 ${qual}static inline fpdtype_t _pyfr_exp(fpdtype_t x)
 {
+    // Clamp to where the two-factor scaling below remains representable;
+    // beyond this exp(x) is zero or infinite in this precision anyway
+    x = fmin${sfx}(fmax${sfx}(x, ${xlim[0]}), ${xlim[1]});
     fpdtype_t n = rint${sfx}(x*${log2e});
     fpdtype_t r = fma${sfx}(-n, ${ln2hi}, x);
     r = fma${sfx}(-n, ${ln2lo}, r);
     fpdtype_t p = ${poly};
-    union { fpdtype_t f; fp_uint_t u; } _b;
-    _b.u = (fp_uint_t)((int)n + ${ebias}) << ${eshift};
-    return p*_b.f;
+
+    // Scale by 2^n as 2^n1*2^n2 so that each factor has a normal exponent;
+    // this gives gradual underflow and overflow to infinity, and is exact
+    // (bitwise identical to a single factor) whenever 2^n is normal
+    int ni = (int)n, n1 = ni / 2, n2 = ni - n1;
+    union { fpdtype_t f; fp_uint_t u; } _b1, _b2;
+    _b1.u = (fp_uint_t)(n1 + ${ebias}) << ${eshift};
+    _b2.u = (fp_uint_t)(n2 + ${ebias}) << ${eshift};
+    return (p*_b1.f)*_b2.f;
 }''')
 
 
@@ -103,8 +112,12 @@ def generate_exp_fn(fpdtype, qual=''):
     # Taylor series for exp(r) on [-ln2/2, ln2/2]
     ecoef = [1/factorial(k) for k in range(ncoef)]
 
+    # Keep both scale factors normal: |n1|, |n2| <= ebias - 1
+    xmax = floor(2*(ebias - 1)*log(2)) - 1
+    xlim = (f'{-xmax:.1f}{sfx}', f'{xmax:.1f}{sfx}')
+
     return _exp_tpl.render(
-        qual=qual, sfx=sfx, eshift=eshift, ebias=ebias,
+        qual=qual, sfx=sfx, eshift=eshift, ebias=ebias, xlim=xlim,
         log2e=f'{1.4426950408889634:.18e}{sfx}',
         ln2hi=f'{ln2hi:.18e}{sfx}', ln2lo=f'{ln2lo:.18e}{sfx}',
         poly=_horner(ecoef, 'r', sfx),
