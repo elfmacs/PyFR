@@ -190,70 +190,7 @@ class BaseFluidElements:
             return wkerns[0]
 
 
-class EulerElements(BaseFluidElements, BaseAdvectionElements):
-    def set_backend(self, *args, **kwargs):
-        super().set_backend(*args, **kwargs)
-
-        # Can elide interior flux calculations at p = 0
-        if self.basis.order == 0:
-            return
-
-        # Register our flux kernels
-        self._be.pointwise.register('pyfr.solvers.euler.kernels.tflux')
-
-        # Template parameters for the flux kernels
-        tplargs = {
-            'ndims': self.ndims,
-            'nvars': self.nvars,
-            'nverts': len(self.basis.linspts),
-            'c': self.cfg.items_as('constants', float),
-            'jac_exprs': self.basis.jac_exprs
-        }
-
-        # Helpers
-        tdisf = []
-        c, l = 'curved', 'linear'
-        r, s = self.mesh_regions, self._slice_mat
-        slicedk = self._make_sliced_kernel
-
-        if c in r and 'flux' not in self.antialias:
-            tdisf.append(lambda uin: self._be.kernel(
-                'tflux', tplargs=tplargs | {'ktype': 'curved'},
-                dims=[self.nupts, r[c]], u=s(self.scal_upts[uin], c),
-                f=s(self._vect_upts, c), smats=self.curved_smat_at('upts')
-            ))
-        elif c in r:
-            tdisf.append(lambda: self._be.kernel(
-                'tflux', tplargs=tplargs | {'ktype': 'curved'},
-                dims=[self.nqpts, r[c]], u=s(self._scal_qpts, c),
-                f=s(self._vect_qpts, c), smats=self.curved_smat_at('qpts')
-            ))
-
-        if l in r and 'flux' not in self.antialias:
-            tdisf.append(lambda uin: self._be.kernel(
-                'tflux', tplargs=tplargs | {'ktype': 'linear'},
-                dims=[self.nupts, r[l]], u=s(self.scal_upts[uin], l),
-                f=s(self._vect_upts, l), verts=self.ploc_at('linspts', l),
-                upts=self.upts
-            ))
-        elif l in r:
-            tdisf.append(lambda: self._be.kernel(
-                'tflux', tplargs=tplargs | {'ktype': 'linear'},
-                dims=[self.nqpts, r[l]], u=s(self._scal_qpts, l),
-                f=s(self._vect_qpts, l), verts=self.ploc_at('linspts', l),
-                upts=self.qpts
-            ))
-
-        if 'flux' not in self.antialias:
-            self.kernels['tdisf'] = lambda uin: slicedk(k(uin) for k in tdisf)
-        else:
-            self.kernels['tdisf'] = lambda: slicedk(k() for k in tdisf)
-
-        # Entropy conservative flux differencing replaces tdisf/tdivtpcorf
-        if self.cfg.get('solver', 'volume-flux', 'standard') != 'standard':
-            self._set_ec_kernels()
-
-    def _set_ec_kernels(self):
+    def _set_ec_kernels(self, viscous=False):
         from pyfr.backends.base import NullKernel
         from pyfr.quadrules import get_quadrule
 
@@ -374,8 +311,12 @@ class EulerElements(BaseFluidElements, BaseAdvectionElements):
             ])
 
         self.kernels['disu'] = disu
-        self.kernels['tdisf'] = lambda uin: NullKernel()
-        self.kernels['tdivtpcorf'] = lambda fout: NullKernel()
+
+        # Without viscous terms there is nothing left for tdisf/tdivtpcorf;
+        # with them these kernels handle the viscous flux only
+        if not viscous:
+            self.kernels['tdisf'] = lambda uin: NullKernel()
+            self.kernels['tdivtpcorf'] = lambda fout: NullKernel()
         if vkern == 'element':
             self.kernels['tfluxdiff'] = lambda uin: be.kernel(
                 'tfluxdiff', tplargs=tplargs, dims=[self.neles],
@@ -396,12 +337,77 @@ class EulerElements(BaseFluidElements, BaseAdvectionElements):
                 u=self.scal_upts[uin], uf=self._ec_ufpts,
                 smats=self._ec_smats, pinfo=self._ec_pinfo, div=self._ec_div
             )
-        self.kernels['tdivtconf'] = lambda fout: be.kernel(
-            'mul', self.opmat('M3'), self._scal_fpts,
-            out=self.scal_upts[fout], beta=0.0
-        )
+        if not viscous:
+            self.kernels['tdivtconf'] = lambda fout: be.kernel(
+                'mul', self.opmat('M3'), self._scal_fpts,
+                out=self.scal_upts[fout], beta=0.0
+            )
 
         # Add the flux differencing divergence in negdivconf
         self._srctplargs['esdiv'] = True
         self.set_external('esdiv', f'in fpdtype_t[{self.nvars}]',
                           value=self._ec_div)
+
+
+class EulerElements(BaseFluidElements, BaseAdvectionElements):
+    def set_backend(self, *args, **kwargs):
+        super().set_backend(*args, **kwargs)
+
+        # Can elide interior flux calculations at p = 0
+        if self.basis.order == 0:
+            return
+
+        # Register our flux kernels
+        self._be.pointwise.register('pyfr.solvers.euler.kernels.tflux')
+
+        # Template parameters for the flux kernels
+        tplargs = {
+            'ndims': self.ndims,
+            'nvars': self.nvars,
+            'nverts': len(self.basis.linspts),
+            'c': self.cfg.items_as('constants', float),
+            'jac_exprs': self.basis.jac_exprs
+        }
+
+        # Helpers
+        tdisf = []
+        c, l = 'curved', 'linear'
+        r, s = self.mesh_regions, self._slice_mat
+        slicedk = self._make_sliced_kernel
+
+        if c in r and 'flux' not in self.antialias:
+            tdisf.append(lambda uin: self._be.kernel(
+                'tflux', tplargs=tplargs | {'ktype': 'curved'},
+                dims=[self.nupts, r[c]], u=s(self.scal_upts[uin], c),
+                f=s(self._vect_upts, c), smats=self.curved_smat_at('upts')
+            ))
+        elif c in r:
+            tdisf.append(lambda: self._be.kernel(
+                'tflux', tplargs=tplargs | {'ktype': 'curved'},
+                dims=[self.nqpts, r[c]], u=s(self._scal_qpts, c),
+                f=s(self._vect_qpts, c), smats=self.curved_smat_at('qpts')
+            ))
+
+        if l in r and 'flux' not in self.antialias:
+            tdisf.append(lambda uin: self._be.kernel(
+                'tflux', tplargs=tplargs | {'ktype': 'linear'},
+                dims=[self.nupts, r[l]], u=s(self.scal_upts[uin], l),
+                f=s(self._vect_upts, l), verts=self.ploc_at('linspts', l),
+                upts=self.upts
+            ))
+        elif l in r:
+            tdisf.append(lambda: self._be.kernel(
+                'tflux', tplargs=tplargs | {'ktype': 'linear'},
+                dims=[self.nqpts, r[l]], u=s(self._scal_qpts, l),
+                f=s(self._vect_qpts, l), verts=self.ploc_at('linspts', l),
+                upts=self.qpts
+            ))
+
+        if 'flux' not in self.antialias:
+            self.kernels['tdisf'] = lambda uin: slicedk(k(uin) for k in tdisf)
+        else:
+            self.kernels['tdisf'] = lambda: slicedk(k() for k in tdisf)
+
+        # Entropy conservative flux differencing replaces tdisf/tdivtpcorf
+        if self.cfg.get('solver', 'volume-flux', 'standard') != 'standard':
+            self._set_ec_kernels()

@@ -164,9 +164,14 @@ class BaseAdvectionDiffusionSystem(BaseAdvectionSystem):
                 ldeps = deps(l, 'eles/gradcoru_upts')
             g_grad_flux.add(l, deps=ldeps + k['eles/avfill'])
 
-        # Compute the transformed divergence of the partially corrected flux
+        # Entropy conservative flux differencing (volume-flux option)
+        for l in k['eles/tfluxdiff']:
+            g_grad_flux.add(l)
+
+        # Compute the transformed divergence of the partially corrected
+        # flux; this overwrites fout which tfluxdiff may be reading
         for l in k['eles/tdivtpcorf']:
-            d = deps(l, 'eles/tdisf', 'eles/tdisf_fused')
+            d = deps(l, 'eles/tdisf', 'eles/tdisf_fused', 'eles/tfluxdiff')
             g_grad_flux.add(l, deps=d)
 
         kgroup = [
