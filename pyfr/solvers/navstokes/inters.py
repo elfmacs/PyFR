@@ -255,3 +255,143 @@ class NavierStokesCharRiemInvPressureBCInters(PressureBCMixin,
                                               NavierStokesBaseBCInters):
     type = 'char-riem-inv-pressure'
     cflux_state = 'ghost'
+
+
+class NavierStokesWMAdiaWallBCInters(NavierStokesBaseBCInters):
+    type = 'wm-adia-wall'
+    cflux_state = None
+
+    def __init__(self, be, lhs, elemap, cfgsect, cfg, bccomm):
+        super().__init__(be, lhs, elemap, cfgsect, cfg, bccomm)
+
+        if self._tplargs['visc_corr'] != 'none':
+            raise ValueError('wm-adia-wall requires constant viscosity')
+
+        if any(etype != 'hex' for etype, *_ in lhs.foreach()):
+            raise ValueError('wm-adia-wall only supports hex elements')
+
+        k = cfg.getint(cfgsect, 'sample-point')
+        debug = cfg.getbool(cfgsect, 'debug', False)
+
+        wmlaw = cfg.get(cfgsect, 'wall-law', 'log-exp')
+        if wmlaw not in {'linear', 'log-exp', 'none'}:
+            raise ValueError(f'wm-adia-wall: unknown wall-law {wmlaw}')
+
+        # LOG-EXP defaults: Zhang, Zhou, Yang & Zhang, arXiv:2104.09054,
+        # eq. (10); kappa = 0.4 from their section I
+        wmc = {'niters': cfg.getint(cfgsect, 'newton-iters', 4),
+               'umin': 1e-30}
+        for cn, cv in [('kappa', 0.4), ('A', 11.630), ('B', 7.194),
+                       ('C', -4.472), ('D', 2.766)]:
+            wmc[cn] = cfg.getfloat(cfgsect, cn, cv)
+
+        # Ghost state used by the inviscid Riemann solve at the wall
+        wmghost = cfg.get(cfgsect, 'inviscid-state', 'slip')
+        if wmghost not in {'slip', 'noslip'}:
+            raise ValueError(f'wm-adia-wall: unknown inviscid-state {wmghost}')
+
+        # Optional suppression of wall-tangential velocity oscillations: an
+        # extra flux damp-k*rho*(u_t - l*du_t/dn) with l = slip-ratio times
+        # the near-wall element height (= h/g_k for Gauss-Legendre points)
+        wmdamp = cfg.getfloat(cfgsect, 'damp-k', 0.0)
+        wmlfac = 0.0
+        if wmdamp:
+            p = elemap['hex'].basis.order
+            gk = (1 + np.sort(np.polynomial.legendre.leggauss(p + 1)[0])[k - 1])/2
+            wmlfac = cfg.getfloat(cfgsect, 'slip-ratio') / gk
+
+        self._tplargs['wmlaw'] = wmlaw
+        self._tplargs['wmc'] = wmc
+        self._tplargs['wmghost'] = wmghost
+        self._tplargs['wmdamp'] = wmdamp
+        self._tplargs['wmlfac'] = wmlfac
+        self._tplargs['wmdebug'] = debug
+
+        # Solution point k above each flux point, and its wall distance,
+        # ordered exactly as the face arrays (cf. _get_inter_arrays)
+        tab = self._sample_table(elemap['hex'], k)
+        parts, reorder = [], []
+        for etype, fidx, eidxs, idx in lhs.foreach():
+            ele = elemap[etype]
+            fpts = ele.srtd_face_fpts[fidx][eidxs]
+            ui = tab[fpts]
+            ec = eidxs[:, None]
+
+            xu = ele.ploc_at_np('upts')[ui, :, ec]
+            xw = ele.plocfpts[fpts, ec]
+            nw = ele._pnorm_fpts[fpts, ec]
+            nw = nw / np.linalg.norm(nw, axis=-1)[..., None]
+            h = -np.einsum('...i,...i', xu - xw, nw)
+
+            if np.any(h <= 0):
+                raise RuntimeError('wm-adia-wall: non-positive sample height')
+
+            parts.append((ui.ravel(), np.repeat(eidxs, fpts.shape[1]),
+                          h.ravel()))
+            reorder.append(np.repeat(idx, ele.nfacefpts[fidx]))
+
+        ro = np.argsort(np.concatenate(reorder), kind='stable')[self._perm]
+        uidx, cidx, hs = [np.concatenate(a)[ro] for a in zip(*parts)]
+
+        # One view of the sampled state per solution register bank.  Views
+        # need committed storage, but the banks' extents are otherwise only
+        # committed after the kernels are generated; so commit them here
+        banks = elemap['hex'].scal_upts
+        bids = {id(b) for b in banks}
+        for name, ext in list(be._extents.items()):
+            if any(id(o) in bids for o, _ in ext._primary._pending):
+                be.commit_extent(ext)
+                del be._extents[name]
+
+        self._uwms = [
+            be.view(np.full(len(uidx), b.mid), uidx, cidx,
+                    vshape=(self.nvars,))
+            for b in banks
+        ]
+        self._hwm = be.const_matrix(hs[None, :])
+
+        extrns = self._external_args | {
+            'uwms': f'in view fpdtype_t[{self.nvars}]',
+            'hwm': 'in fpdtype_t'
+        }
+        extvals = self._external_vals | {'hwm': self._hwm}
+
+        if debug:
+            nd = self.nvars + self.ndims
+            self.wmdbg = be.matrix((nd, self.ninterfpts))
+            extrns['wmdbg'] = f'out fpdtype_t[{nd}]'
+            extvals['wmdbg'] = self.wmdbg
+
+        self.kernels['comm_flux'] = lambda uin: self._be.kernel(
+            'bccflux', tplargs=self._tplargs, dims=[self.ninterfpts],
+            extrns=extrns, ul=self.scal_lhs, gradul=self._vect_lhs,
+            nl=self._pnorm_lhs, artvisc=self.artvisc,
+            uwms=self._uwms[uin], **extvals
+        )
+
+    @staticmethod
+    def _sample_table(ele, k):
+        basis = ele.basis
+        upts, fpts = np.array(basis.upts), np.array(basis.fpts)
+        tab = np.empty(len(fpts), dtype=int)
+
+        for (kind, proj, norm), ffpts in zip(basis.faces, basis.facefpts):
+            nref = np.array(norm, dtype=float)
+
+            for i in ffpts:
+                d = upts - fpts[i]
+                tang = d - np.outer(d @ nref, nref)
+                col = np.where(np.linalg.norm(tang, axis=1) < 1e-10)[0]
+
+                if len(col) != basis.order + 1:
+                    raise ValueError('wm-adia-wall requires solution points '
+                                     'aligned with face flux points')
+                if not 1 <= k <= len(col):
+                    raise ValueError(f'sample-point must be in '
+                                     f'1..{len(col)}')
+
+                # Order the column by distance from the face
+                col = col[np.argsort(-(d[col] @ nref))]
+                tab[i] = col[k - 1]
+
+        return tab
