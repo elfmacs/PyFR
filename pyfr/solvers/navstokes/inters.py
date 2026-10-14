@@ -1,3 +1,4 @@
+import math
 import numpy as np
 
 from pyfr.exprs import npeval
@@ -270,7 +271,16 @@ class NavierStokesWMAdiaWallBCInters(NavierStokesBaseBCInters):
         if any(etype != 'hex' for etype, *_ in lhs.foreach()):
             raise ValueError('wm-adia-wall only supports hex elements')
 
-        k = cfg.getint(cfgsect, 'sample-point')
+        # Velocity input: the state at one solution point (sample = point,
+        # sample-point k) or the mean along the column of solution points
+        # normal to the wall (sample = column-mean), matched to the mean of
+        # the wall law over the wall-element height
+        sample = cfg.get(cfgsect, 'sample', 'point')
+        if sample not in {'point', 'column-mean'}:
+            raise ValueError(f'wm-adia-wall: unknown sample {sample}')
+
+        wmint = sample == 'column-mean'
+        k = 1 if wmint else cfg.getint(cfgsect, 'sample-point')
         debug = cfg.getbool(cfgsect, 'debug', False)
 
         wmlaw = cfg.get(cfgsect, 'wall-law', 'log-exp')
@@ -300,6 +310,8 @@ class NavierStokesWMAdiaWallBCInters(NavierStokesBaseBCInters):
         # the near-wall element height (= h/g_k for Gauss-Legendre points)
         wmdamp = cfg.getfloat(cfgsect, 'damp-k', 0.0)
         wmlfac = 0.0
+        if wmdamp and wmint:
+            raise ValueError('wm-adia-wall: damp-k requires sample = point')
         if wmdamp:
             p = elemap['hex'].basis.order
             gk = (1 + np.sort(np.polynomial.legendre.leggauss(p + 1)[0])[k - 1])/2
@@ -311,32 +323,71 @@ class NavierStokesWMAdiaWallBCInters(NavierStokesBaseBCInters):
         self._tplargs['wmdamp'] = wmdamp
         self._tplargs['wmlfac'] = wmlfac
         self._tplargs['wmdebug'] = debug
+        self._tplargs['wmint'] = wmint
 
-        # Solution point k above each flux point, and its wall distance,
-        # ordered exactly as the face arrays (cf. _get_inter_arrays)
-        tab = self._sample_table(elemap['hex'], k)
+        # Taylor series of the mean LOG-EXP law, used for Y < wmy0
+        kp, a, b, cc, d = (wmc[cn] for cn in ['kappa', 'A', 'B', 'C', 'D'])
+        self._tplargs['wmy0'] = 0.3
+        self._tplargs['wmser'] = [
+            ((-1)**(n + 1)*math.factorial(n - 1)*kp**(n - 1) - a*(-1/b)**n
+             - cc*(-1/d)**n) / math.factorial(n + 1) for n in range(1, 13)
+        ]
+
+        # Solution points of the normal column above each flux point (nearest
+        # first) and their wall distances, ordered exactly as the face arrays
+        # (cf. _get_inter_arrays)
+        tab, tref = self._sample_table(elemap['hex'], k)
+        cols = range(tab.shape[1]) if wmint else [k - 1]
         parts, reorder = [], []
         for etype, fidx, eidxs, idx in lhs.foreach():
             ele = elemap[etype]
             fpts = ele.srtd_face_fpts[fidx][eidxs]
-            ui = tab[fpts]
             ec = eidxs[:, None]
-
-            xu = ele.ploc_at_np('upts')[ui, :, ec]
             xw = ele.plocfpts[fpts, ec]
             nw = ele._pnorm_fpts[fpts, ec]
             nw = nw / np.linalg.norm(nw, axis=-1)[..., None]
-            h = -np.einsum('...i,...i', xu - xw, nw)
 
-            if np.any(h <= 0):
-                raise RuntimeError('wm-adia-wall: non-positive sample height')
+            uis, hs = [], []
+            for j in cols:
+                ui = tab[fpts, j]
+                xu = ele.ploc_at_np('upts')[ui, :, ec]
+                h = -np.einsum('...i,...i', xu - xw, nw)
 
-            parts.append((ui.ravel(), np.repeat(eidxs, fpts.shape[1]),
-                          h.ravel()))
+                if np.any(h <= 0):
+                    raise RuntimeError('wm-adia-wall: non-positive sample '
+                                       'height')
+
+                uis.append(ui.ravel())
+                hs.append(h.ravel())
+
+            parts.append((np.array(uis), np.repeat(eidxs, fpts.shape[1]),
+                          np.array(hs)))
             reorder.append(np.repeat(idx, ele.nfacefpts[fidx]))
 
         ro = np.argsort(np.concatenate(reorder), kind='stable')[self._perm]
-        uidx, cidx, hs = [np.concatenate(a)[ro] for a in zip(*parts)]
+        uidxs = np.concatenate([p[0] for p in parts], axis=1)[:, ro]
+        cidx = np.concatenate([p[1] for p in parts])[ro]
+        hcol = np.concatenate([p[2] for p in parts], axis=1)[:, ro]
+
+        if wmint and tab.shape[1] > 9:
+            raise ValueError('wm-adia-wall: column-mean supports order <= 8')
+
+        if wmint:
+            # Wall-element height from each column point, h_j = H t_j/2 with
+            # t_j the reference distance in [0, 2]; the column must be affine
+            Hs = 2*hcol / tref[:, None]
+            hs = Hs.mean(axis=0)
+            if np.abs(Hs/hs - 1).max() > 1e-8:
+                raise RuntimeError('wm-adia-wall: column-mean requires '
+                                   'elements affine along the wall normal')
+
+            # Interpolatory weights of the column nodes over [0, 2], halved
+            V = np.vander(tref, increasing=True).T
+            m = np.array([2**(i + 1)/(i + 1) for i in range(len(tref))])
+            self._tplargs['wmw'] = [float(w) for w in np.linalg.solve(V, m)/2]
+        else:
+            self._tplargs['wmw'] = [1.0]
+            hs = hcol[0]
 
         # One view of the sampled state per solution register bank.  Views
         # need committed storage, but the banks' extents are otherwise only
@@ -349,16 +400,16 @@ class NavierStokesWMAdiaWallBCInters(NavierStokesBaseBCInters):
                 del be._extents[name]
 
         self._uwms = [
-            be.view(np.full(len(uidx), b.mid), uidx, cidx,
-                    vshape=(self.nvars,))
+            [be.view(np.full(len(cidx), b.mid), uidx, cidx,
+                     vshape=(self.nvars,)) for uidx in uidxs]
             for b in banks
         ]
         self._hwm = be.const_matrix(hs[None, :])
 
+        self._uwnames = ['uwms'] + [f'uwms{j}' for j in range(1, len(uidxs))]
         extrns = self._external_args | {
-            'uwms': f'in view fpdtype_t[{self.nvars}]',
-            'hwm': 'in fpdtype_t'
-        }
+            n: f'in view fpdtype_t[{self.nvars}]' for n in self._uwnames
+        } | {'hwm': 'in fpdtype_t'}
         extvals = self._external_vals | {'hwm': self._hwm}
 
         if debug:
@@ -371,14 +422,15 @@ class NavierStokesWMAdiaWallBCInters(NavierStokesBaseBCInters):
             'bccflux', tplargs=self._tplargs, dims=[self.ninterfpts],
             extrns=extrns, ul=self.scal_lhs, gradul=self._vect_lhs,
             nl=self._pnorm_lhs, artvisc=self.artvisc,
-            uwms=self._uwms[uin], **extvals
+            **dict(zip(self._uwnames, self._uwms[uin])), **extvals
         )
 
     @staticmethod
     def _sample_table(ele, k):
         basis = ele.basis
         upts, fpts = np.array(basis.upts), np.array(basis.fpts)
-        tab = np.empty(len(fpts), dtype=int)
+        tab = np.empty((len(fpts), basis.order + 1), dtype=int)
+        tref = None
 
         for (kind, proj, norm), ffpts in zip(basis.faces, basis.facefpts):
             nref = np.array(norm, dtype=float)
@@ -396,7 +448,13 @@ class NavierStokesWMAdiaWallBCInters(NavierStokesBaseBCInters):
                                      f'1..{len(col)}')
 
                 # Order the column by distance from the face
-                col = col[np.argsort(-(d[col] @ nref))]
-                tab[i] = col[k - 1]
+                t = -(d[col] @ nref)
+                o = np.argsort(t)
+                tab[i] = col[o]
 
-        return tab
+                if tref is None:
+                    tref = t[o]
+                elif np.abs(t[o] - tref).max() > 1e-10:
+                    raise ValueError('wm-adia-wall: columns differ')
+
+        return tab, tref

@@ -41,9 +41,41 @@
 % for i in range(ndims):
     vt[${i}] = rcprho*us[${i + 1}] - vn*nl[${i}];
 % endfor
-% if wmlaw == 'linear':
+% if wmlaw == 'linear' and wmint:
+    // Column-mean form: mean of u = tau y/mu over [0, H] gives tau = 2 mu U/H
+% for i in range(ndims):
+    tau[${i}] = ${2*c['mu']}*vt[${i}]/h;
+% endfor
+% elif wmlaw == 'linear':
 % for i in range(ndims):
     tau[${i}] = ${c['mu']}*vt[${i}]/h;
+% endfor
+% elif wmlaw == 'log-exp' and wmint:
+<% k, a, b, cc, d = wmc['kappa'], wmc['A'], wmc['B'], wmc['C'], wmc['D'] %>
+    // Column-mean form: U = u_tau G(Y), Y = H u_tau/nu, G(Y) the mean of the
+    // LOG-EXP law over [0, Y] (analytic; Taylor series for Y < ${wmy0} to avoid
+    // cancellation).  d(u_tau G)/du_tau = F(Y), so Newton divides by F
+    fpdtype_t nu = ${c['mu']}*rcprho;
+    fpdtype_t us_t = fmax(sqrt(${pyfr.dot('vt[{i}]', i=ndims)}), ${wmc['umin']});
+    fpdtype_t ut = sqrt(nu*us_t/(${wmser[0]}*h));
+% for it in range(wmc['niters']):
+    {
+        fpdtype_t Y = h*ut/nu;
+        fpdtype_t F = log1p(${k}*Y)*${1/k}
+                    - ${a}*expm1(-Y*${1/b}) - ${cc}*expm1(-Y*${1/d});
+        fpdtype_t G;
+        if (Y < ${wmy0})
+            G = ${'('*len(wmser)}${')*Y + '.join(str(cm) for cm in reversed(wmser))})*Y;
+        else
+            G = ((1 + ${k}*Y)*log1p(${k}*Y) - ${k}*Y)*${1/k**2}/Y
+              + ${a}*(1 + ${b}*expm1(-Y*${1/b})/Y)
+              + ${cc}*(1 + ${d}*expm1(-Y*${1/d})/Y);
+        ut -= (ut*G - us_t)/F;
+    }
+% endfor
+    fpdtype_t s = rhow*ut*ut/us_t;
+% for i in range(ndims):
+    tau[${i}] = s*vt[${i}];
 % endfor
 % elif wmlaw == 'log-exp':
 <% k, a, b, cc, d = wmc['kappa'], wmc['A'], wmc['B'], wmc['C'], wmc['D'] %>
@@ -83,7 +115,7 @@
 </%pyfr:macro>
 
 <%pyfr:macro name='bc_common_flux_state' params='ul, gradul, artviscl, nl, magnl'
-              externs='uwms, hwm, wmdbg'>
+              externs='uwms, uwms1, uwms2, uwms3, uwms4, uwms5, uwms6, uwms7, uwms8, hwm, wmdbg'>
     // Inviscid part: slip wall
     fpdtype_t ur[${nvars}];
     ${pyfr.expand('bc_rsolve_state', 'ul', 'nl', 'ur')};
@@ -93,7 +125,17 @@
 
     // Viscous part: momentum flux into the wall from the wall model
     fpdtype_t tau[${ndims}];
+% if wmint:
+    // Mean state along the normal column of solution points above this flux
+    // point (interpolatory weights of the column, summing to one)
+    fpdtype_t usm[${nvars}];
+% for i in range(nvars):
+    usm[${i}] = ${' + '.join(f'{w!r}*uwms{j or ""}[{i}]' for j, w in enumerate(wmw))};
+% endfor
+    ${pyfr.expand('bc_wm_tau', 'usm', 'hwm', 'nl', 'ul[0]', 'tau')};
+% else:
     ${pyfr.expand('bc_wm_tau', 'uwms', 'hwm', 'nl', 'ul[0]', 'tau')};
+% endif
 
 % if wmdamp:
     // Oscillation suppression: penalise the mismatch between the wall-face
@@ -128,7 +170,7 @@
 % if wmdebug:
     // Debug output: sampled state followed by the wall-model tau
 % for i in range(nvars):
-    wmdbg[${i}] = uwms[${i}];
+    wmdbg[${i}] = ${'usm' if wmint else 'uwms'}[${i}];
 % endfor
 % for i in range(ndims):
     wmdbg[${nvars + i}] = tau[${i}];
