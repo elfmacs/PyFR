@@ -274,7 +274,7 @@ class NavierStokesWMAdiaWallBCInters(NavierStokesBaseBCInters):
         debug = cfg.getbool(cfgsect, 'debug', False)
 
         wmlaw = cfg.get(cfgsect, 'wall-law', 'log-exp')
-        if wmlaw not in {'linear', 'log-exp', 'none'}:
+        if wmlaw not in {'linear', 'log-exp', 'fixed', 'none'}:
             raise ValueError(f'wm-adia-wall: unknown wall-law {wmlaw}')
 
         # LOG-EXP defaults: Zhang, Zhou, Yang & Zhang, arXiv:2104.09054,
@@ -284,6 +284,11 @@ class NavierStokesWMAdiaWallBCInters(NavierStokesBaseBCInters):
         for cn, cv in [('kappa', 0.4), ('A', 11.630), ('B', 7.194),
                        ('C', -4.472), ('D', 2.766)]:
             wmc[cn] = cfg.getfloat(cfgsect, cn, cv)
+
+        # Diagnostic: wall shear stress of fixed magnitude tau-fixed along the
+        # sampled tangential velocity
+        if wmlaw == 'fixed':
+            wmc['tau'] = cfg.getfloat(cfgsect, 'tau-fixed')
 
         # Ghost state used by the inviscid Riemann solve at the wall
         wmghost = cfg.get(cfgsect, 'inviscid-state', 'slip')

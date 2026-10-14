@@ -67,6 +67,13 @@
 % for i in range(ndims):
     tau[${i}] = s*vt[${i}];
 % endfor
+% elif wmlaw == 'fixed':
+    // Diagnostic only: fixed magnitude along the sampled tangential velocity
+    fpdtype_t us_t = fmax(sqrt(${pyfr.dot('vt[{i}]', i=ndims)}), ${wmc['umin']});
+    fpdtype_t s = ${wmc['tau']}/us_t;
+% for i in range(ndims):
+    tau[${i}] = s*vt[${i}];
+% endfor
 % elif wmlaw == 'none':
     // Diagnostic only: zero wall shear stress
 % for i in range(ndims):
