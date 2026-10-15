@@ -106,8 +106,9 @@
 % for i in range(ndims):
     tau[${i}] = s*vt[${i}];
 % endfor
-% elif wmlaw == 'none':
-    // Diagnostic only: zero wall shear stress
+% elif wmlaw == 'zero-stress':
+    // Diagnostic only: zero wall shear stress, i.e. a stress-free slip wall
+    // (not a no-slip wall without a wall model)
 % for i in range(ndims):
     tau[${i}] = 0;
 % endfor

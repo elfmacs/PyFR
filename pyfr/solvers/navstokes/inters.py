@@ -284,7 +284,7 @@ class NavierStokesWMAdiaWallBCInters(NavierStokesBaseBCInters):
         debug = cfg.getbool(cfgsect, 'debug', False)
 
         wmlaw = cfg.get(cfgsect, 'wall-law', 'log-exp')
-        if wmlaw not in {'linear', 'log-exp', 'fixed', 'none'}:
+        if wmlaw not in {'linear', 'log-exp', 'fixed', 'zero-stress'}:
             raise ValueError(f'wm-adia-wall: unknown wall-law {wmlaw}')
 
         # LOG-EXP defaults: Zhang, Zhou, Yang & Zhang, arXiv:2104.09054,
