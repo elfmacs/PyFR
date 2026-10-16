@@ -28,7 +28,7 @@
 
 | 改动 | 文件 / 提交 | 说明 | 状态 |
 |---|---|---|---|
-| 熵守恒通量差分（Chan 2018 解耦 SBP，Gauss 点） | `euler/elements.py`（`_set_ec_kernels`）、`kernels/ecflux.mako`、`entvar.mako`、`entproj.mako`、`tfluxdiff.mako`；`a2435d2c` `151211eb` | 仅六面体、Gauss 点、仿射单元、FP64 | **有效**：同设置下标准格式 t≈11 发散，ES 全部算例稳定到 t=400，熵单调减 |
+| 熵守恒通量差分（Chan 2018 解耦 SBP，Gauss 点） | `euler/elements.py`（`_set_ec_kernels`，一维算子取自 PyFR 线基）、`kernels/ecflux.mako`、`entvar.mako`、`entproj.mako`、`tfluxdiff.mako`；`a2435d2c` `151211eb` | 仅六面体、Gauss 点、仿射单元、FP64 | **有效**：同设置下标准格式 t≈11 发散，ES 全部算例稳定到 t=400，熵单调减 |
 | NS 中无粘部分走通量差分 | `navstokes/elements.py`、`navstokes/kernels/tflux.mako`；`48e045f9` | tflux 只算粘性部分 | **有效** |
 | 散度经外部项加进右端 | `baseadvec/elements.py`、`baseadvec/kernels/negdivconf.mako`（`esdiv`） | | **有效** |
 | 计算图依赖：tdivtconf/tdivtpcorf 排在 tfluxdiff 之后 | `baseadvec/system.py`、`baseadvecdiff/system.py`；`47281505` `48e045f9` | 修复 uin==fout 时的读写竞争（CUDA 上 RK4 出 NaN） | **有效**（必要的修复） |
@@ -43,13 +43,13 @@
 | 基本框架：镜像滑移 ghost + τ_w 动量通量，采样表与视图 | | **有效** |
 | `sample = point`，`sample-point = k` | 取贴壁单元第 k 个解点 | **有效但被取代**：τ_w 随 k 在 −20%～+7.5%（4 层）间变化（`s_es400_k1..k4`）；保留作对照 |
 | `sample = column-mean`（`5b748fb3`） | 整列加权平均 + 壁律解析积分平均 | **有效**：τ_w +2.2%（4 层）、+0.6%（8 层）、+0.6%（p=4），不依赖采样点（`s_es400_cm`、`s8_es400_cm`、`s_p4_cm`） |
-| `wall-law = log-exp` | LOG-EXP 壁律（Zhang 等 arXiv:2104.09054 式 10） | **有效** |
-| `wall-law = linear` | 线性律 | **工具**（内核检验） |
-| `wall-law = fixed`，`tau-fixed`（`cf40307c`） | τ_w 大小固定 | **工具**：证明对数区应力偏差与 τ_w 大小基本无关（`s_es400_fix`） |
-| `wall-law = zero-stress`（原名 `none`，`5bb4de1b` 改名） | τ=0，零切应力滑移壁，不是无滑移 | **工具**（分项诊断中分离 τ_w 贡献） |
+| LOG-EXP 壁律 | Zhang 等 arXiv:2104.09054 式 10；唯一壁律，不再有 `wall-law` 选项 | **有效** |
+| ~~`wall-law = linear`~~ | 已删除 | 工具，用途已完成（内核检验） |
+| ~~`wall-law = fixed`，`tau-fixed`~~（原 `cf40307c`） | 已删除 | 工具，用途已完成：证明对数区应力偏差与 τ_w 大小基本无关（`s_es400_fix`） |
+| ~~`wall-law = zero-stress`~~（原名 `none`） | 已删除 | 与上游 `slp-adia-wall` 的 RHS 逐位相同（rusanov/ec-rusanov、point/column-mean 均验证），诊断改用上游边界 |
 | ~~`inviscid-state = noslip`~~ | 已删除 | 曾证明无效：Rusanov 下壁面力符号错误，HLLC 下发散（3.1 标准格式） |
 | ~~`damp-k`、`slip-ratio`~~ | 已删除 | 曾证明无效：该项与 τ_WM 抵消，壁面合力≈0（3.1 标准格式） |
-| `debug` | 输出采样状态与 τ | **工具**（内核检验） |
+| ~~`debug`~~ | 已删除 | 内核检验改为读格式实际使用的面通量。打开它会改变编译器的 FMA 合并，使 τ 差 1 ulp，测量通道本身干扰被测量 |
 
 ### 2.3 恒流量驱动插件 `flowrate`
 
@@ -71,7 +71,6 @@
 | ~~`stress-deposit = volume`~~（原 `7abd9574`） | 已删除 | 曾证明有害：近壁解析应力被压没、湍流强度降约 38%、τ_w +8.7%（`s_es400_cmvol`） |
 | `stress-deposit = first-point`（`3e1d2bc5`） | τ_w 全部作第一离壁解点上的汇 | **有效**：第一层速度误差 p=3 −11.8%→−3.0%，p=4 −5.9%→+0.9%；对数区 −uv⁺、uu⁺ 偏高约减半（`s_es400_cmfp`、`s_p4_cmfp`）。尚无稳定性证明 |
 | `negdivconf` 外部源 `wmsrc`、`baseadvec/elements.py` 开关 | 为第一离壁点服务，默认关闭 | 随第一离壁点 |
-| `wall-law = none` 置零修复（`2bd12b0b`） | 7abd9574 误删了 τ=0 | 修复 |
 
 ## 四、已被算例证明无效并已删除的改动（2026-10-16）
 
@@ -83,4 +82,15 @@
 删除后的回归（均与删除前逐位或逐字一致）：壁模型单点默认路径内核检验（k=1–4）、列平均内核检验、
 4 层网格整算例 t=10 解场（五个守恒量逐位相同）、熵守恒内核检验 level3（同线程数对比）。
 
-另有 `sample = point` 虽能工作，但已被 `column-mean` 取代；`wall-law = fixed/zero-stress/linear`、`ec`、`debug` 为诊断工具。
+另有 `sample = point` 虽能工作，但已被 `column-mean` 取代；`ec` 为诊断工具。
+
+## 五、整洁性清理（2026-10-16）
+
+1. 删除诊断桩：`wall-law`（`linear`/`fixed`/`zero-stress`）、`tau-fixed`、`debug`；壁模型类不再保存只给测试用的属性（`_hwm`、`_uwms`、`_uwnames`、`_wmcols`）。
+2. `_set_ec_kernels` 的一维求导矩阵与端点插值改用 PyFR 自带的 `get_polybasis('line', ...)`，不再手写 Lagrange 公式（与手写版差 ≤1e-15 相对）。
+3. 检验脚本（`examples_src/wmles/dev/test_*_dev.py`）只从面通量/RHS 读 τ，列与 H 由脚本按几何独立求出。
+
+回归：
+- 壁模型内核（关闭 debug 后对比）：point、column-mean 的面通量与 RHS 与清理前逐位相同；
+- 4 层整算例 t=10 解场：只含第 1 项时与 `s_es400` 逐位相同；含第 2 项时相对差 2e-13（舍入，经混沌动力学放大）；
+- level3 熵守恒检验：熵误差、守恒误差仍在 1e-17～1e-15。

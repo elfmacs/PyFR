@@ -281,11 +281,6 @@ class NavierStokesWMAdiaWallBCInters(NavierStokesBaseBCInters):
 
         wmint = sample == 'column-mean'
         k = 1 if wmint else cfg.getint(cfgsect, 'sample-point')
-        debug = cfg.getbool(cfgsect, 'debug', False)
-
-        wmlaw = cfg.get(cfgsect, 'wall-law', 'log-exp')
-        if wmlaw not in {'linear', 'log-exp', 'fixed', 'zero-stress'}:
-            raise ValueError(f'wm-adia-wall: unknown wall-law {wmlaw}')
 
         # LOG-EXP defaults: Zhang, Zhou, Yang & Zhang, arXiv:2104.09054,
         # eq. (10); kappa = 0.4 from their section I
@@ -295,14 +290,7 @@ class NavierStokesWMAdiaWallBCInters(NavierStokesBaseBCInters):
                        ('C', -4.472), ('D', 2.766)]:
             wmc[cn] = cfg.getfloat(cfgsect, cn, cv)
 
-        # Diagnostic: wall shear stress of fixed magnitude tau-fixed along the
-        # sampled tangential velocity
-        if wmlaw == 'fixed':
-            wmc['tau'] = cfg.getfloat(cfgsect, 'tau-fixed')
-
-        self._tplargs['wmlaw'] = wmlaw
         self._tplargs['wmc'] = wmc
-        self._tplargs['wmdebug'] = debug
         self._tplargs['wmint'] = wmint
 
         # Taylor series of the mean LOG-EXP law, used for Y < wmy0
@@ -379,30 +367,25 @@ class NavierStokesWMAdiaWallBCInters(NavierStokesBaseBCInters):
                 be.commit_extent(ext)
                 del be._extents[name]
 
-        self._uwms = [
-            [be.view(np.full(len(cidx), b.mid), uidx, cidx,
-                     vshape=(self.nvars,)) for uidx in uidxs]
+        uwnames = ['uwms'] + [f'uwms{j}' for j in range(1, len(uidxs))]
+        uwms = [
+            dict(zip(uwnames, (be.view(np.full(len(cidx), b.mid), uidx, cidx,
+                                       vshape=(self.nvars,))
+                               for uidx in uidxs)))
             for b in banks
         ]
-        self._hwm = be.const_matrix(hs[None, :])
 
-        self._uwnames = ['uwms'] + [f'uwms{j}' for j in range(1, len(uidxs))]
         extrns = self._external_args | {
-            n: f'in view fpdtype_t[{self.nvars}]' for n in self._uwnames
+            n: f'in view fpdtype_t[{self.nvars}]' for n in uwnames
         } | {'hwm': 'in fpdtype_t'}
-        extvals = self._external_vals | {'hwm': self._hwm}
-
-        if debug:
-            nd = self.nvars + self.ndims
-            self.wmdbg = be.matrix((nd, self.ninterfpts))
-            extrns['wmdbg'] = f'out fpdtype_t[{nd}]'
-            extvals['wmdbg'] = self.wmdbg
+        extvals = self._external_vals | {
+            'hwm': be.const_matrix(hs[None, :])
+        }
 
         self.kernels['comm_flux'] = lambda uin: self._be.kernel(
             'bccflux', tplargs=self._tplargs, dims=[self.ninterfpts],
             extrns=extrns, ul=self.scal_lhs, gradul=self._vect_lhs,
-            nl=self._pnorm_lhs, artvisc=self.artvisc,
-            **dict(zip(self._uwnames, self._uwms[uin])), **extvals
+            nl=self._pnorm_lhs, artvisc=self.artvisc, **uwms[uin], **extvals
         )
 
     @staticmethod

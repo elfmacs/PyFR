@@ -192,6 +192,7 @@ class BaseFluidElements:
 
     def _set_ec_kernels(self, viscous=False):
         from pyfr.backends.base import NullKernel
+        from pyfr.polys import get_polybasis
         from pyfr.quadrules import get_quadrule
 
         cfg, basis = self.cfg, self.basis
@@ -223,20 +224,10 @@ class BaseFluidElements:
         # One dimensional operators on the Gauss points
         n1 = basis.order + 1
         q = get_quadrule('line', 'gauss-legendre', n1)
-        x1, w1 = q.pts.ravel(), q.wts
-        D1 = np.zeros((n1, n1))
-        for i in range(n1):
-            for j in range(n1):
-                if i != j:
-                    D1[i, j] = (np.prod([x1[i] - x1[k] for k in range(n1)
-                                         if k not in (i, j)]) /
-                                np.prod([x1[j] - x1[k] for k in range(n1)
-                                         if k != j]))
-            D1[i, i] = sum(1/(x1[i] - x1[k]) for k in range(n1) if k != i)
-
-        Vf = np.array([[np.prod([(s - x1[k])/(x1[j] - x1[k])
-                                 for k in range(n1) if k != j])
-                        for j in range(n1)] for s in (-1.0, 1.0)])
+        x1, w1 = q.pts, q.wts
+        lb = get_polybasis('line', basis.order, x1[:, None])
+        D1 = lb.jac_nodal_basis_at(x1[:, None])[0].T
+        Vf = lb.nodal_basis_at(np.array([[-1.0], [1.0]]))
         B = np.diag([-1.0, 1.0])
         S0 = np.diag(w1) @ D1 - 0.5*Vf.T @ B @ Vf
 

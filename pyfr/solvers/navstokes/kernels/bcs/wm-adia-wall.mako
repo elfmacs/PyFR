@@ -32,22 +32,16 @@
 % for i in range(ndims):
     vt[${i}] = rcprho*us[${i + 1}] - vn*nl[${i}];
 % endfor
-% if wmlaw == 'linear' and wmint:
-    // Column-mean form: mean of u = tau y/mu over [0, H] gives tau = 2 mu U/H
-% for i in range(ndims):
-    tau[${i}] = ${2*c['mu']}*vt[${i}]/h;
-% endfor
-% elif wmlaw == 'linear':
-% for i in range(ndims):
-    tau[${i}] = ${c['mu']}*vt[${i}]/h;
-% endfor
-% elif wmlaw == 'log-exp' and wmint:
+
+    // LOG-EXP law (Zhang et al., arXiv:2104.09054, eq. 10) solved for u_tau
+    // by Newton from a linear-law start
 <% k, a, b, cc, d = wmc['kappa'], wmc['A'], wmc['B'], wmc['C'], wmc['D'] %>
+    fpdtype_t nu = ${c['mu']}*rcprho;
+    fpdtype_t us_t = fmax(sqrt(${pyfr.dot('vt[{i}]', i=ndims)}), ${wmc['umin']});
+% if wmint:
     // Column-mean form: U = u_tau G(Y), Y = H u_tau/nu, G(Y) the mean of the
     // LOG-EXP law over [0, Y] (analytic; Taylor series for Y < ${wmy0} to avoid
     // cancellation).  d(u_tau G)/du_tau = F(Y), so Newton divides by F
-    fpdtype_t nu = ${c['mu']}*rcprho;
-    fpdtype_t us_t = fmax(sqrt(${pyfr.dot('vt[{i}]', i=ndims)}), ${wmc['umin']});
     fpdtype_t ut = sqrt(nu*us_t/(${wmser[0]}*h));
 % for it in range(wmc['niters']):
     {
@@ -64,16 +58,8 @@
         ut -= (ut*G - us_t)/F;
     }
 % endfor
-    fpdtype_t s = rhow*ut*ut/us_t;
-% for i in range(ndims):
-    tau[${i}] = s*vt[${i}];
-% endfor
-% elif wmlaw == 'log-exp':
-<% k, a, b, cc, d = wmc['kappa'], wmc['A'], wmc['B'], wmc['C'], wmc['D'] %>
-    // LOG-EXP law (Zhang et al., arXiv:2104.09054, eq. 10) solved for
-    // u_tau with Newton on g = u_tau*F(y+) - |u_t|, linear-law start
-    fpdtype_t nu = ${c['mu']}*rcprho;
-    fpdtype_t us_t = fmax(sqrt(${pyfr.dot('vt[{i}]', i=ndims)}), ${wmc['umin']});
+% else:
+    // Point form: U = u_tau F(y+), y+ = h u_tau/nu; Newton on u_tau F - U
     fpdtype_t ut = sqrt(nu*us_t/h);
 % for it in range(wmc['niters']):
     {
@@ -85,29 +71,16 @@
         ut -= (ut*F - us_t)/(F + yp*dF);
     }
 % endfor
+% endif
     // tau = rho_w u_tau^2 t, written so that it tends to zero with |u_t|
     fpdtype_t s = rhow*ut*ut/us_t;
 % for i in range(ndims):
     tau[${i}] = s*vt[${i}];
 % endfor
-% elif wmlaw == 'fixed':
-    // Diagnostic only: fixed magnitude along the sampled tangential velocity
-    fpdtype_t us_t = fmax(sqrt(${pyfr.dot('vt[{i}]', i=ndims)}), ${wmc['umin']});
-    fpdtype_t s = ${wmc['tau']}/us_t;
-% for i in range(ndims):
-    tau[${i}] = s*vt[${i}];
-% endfor
-% elif wmlaw == 'zero-stress':
-    // Diagnostic only: zero wall shear stress, i.e. a stress-free slip wall
-    // (not a no-slip wall without a wall model)
-% for i in range(ndims):
-    tau[${i}] = 0;
-% endfor
-% endif
 </%pyfr:macro>
 
 <%pyfr:macro name='bc_common_flux_state' params='ul, gradul, artviscl, nl, magnl'
-              externs='uwms, uwms1, uwms2, uwms3, uwms4, uwms5, uwms6, uwms7, uwms8, hwm, wmdbg'>
+              externs='uwms, uwms1, uwms2, uwms3, uwms4, uwms5, uwms6, uwms7, uwms8, hwm'>
     // Inviscid part: slip wall
     fpdtype_t ur[${nvars}];
     ${pyfr.expand('bc_rsolve_state', 'ul', 'nl', 'ur')};
@@ -134,14 +107,4 @@
     ul[${i + 1}] = magnl*(ficomm[${i + 1}] + tau[${i}]);
 % endfor
     ul[${nvars - 1}] = magnl*ficomm[${nvars - 1}];
-
-% if wmdebug:
-    // Debug output: sampled state followed by the wall-model tau
-% for i in range(nvars):
-    wmdbg[${i}] = ${'usm' if wmint else 'uwms'}[${i}];
-% endfor
-% for i in range(ndims):
-    wmdbg[${nvars + i}] = tau[${i}];
-% endfor
-% endif
 </%pyfr:macro>
