@@ -34,7 +34,7 @@
 | 计算图依赖：tdivtconf/tdivtpcorf 排在 tfluxdiff 之后 | `baseadvec/system.py`、`baseadvecdiff/system.py`；`47281505` `48e045f9` | 修复 uin==fout 时的读写竞争（CUDA 上 RK4 出 NaN） | **有效**（必要的修复） |
 | `ec-rusanov` 界面通量 | `rsolvers/ec-rusanov.mako`；`a375ba16` | 熵守恒 + LF 型耗散 | **有效**（所有 ES 正式算例） |
 | `ec` 纯熵守恒界面通量 | `rsolvers/ec.mako` | | **工具**（熵守恒检验、分项诊断） |
-| 按解点并行的 GPU 内核 `tfluxdiffp`（`volume-flux-kernel = point`） | `tfluxdiffp.mako`；`e0c9f5d9` | 与 `tfluxdiff` 求和顺序相同 | **无效**（性能）：CUDA 上实测无加速，原因是 PyFR 二维内核每线程循环多行；结果正确 |
+| ~~按解点并行的 GPU 内核 `tfluxdiffp`~~ | 已删除（原 `e0c9f5d9`） | CUDA 上实测无加速 | **已删除**；GPU 上现与 CPU 一样用按单元并行的 `tfluxdiff` |
 
 ### 2.2 壁模型边界 `wm-adia-wall`（`navstokes/inters.py`、`kernels/bcs/wm-adia-wall.mako`；`749c6a7d` 起）
 
@@ -47,8 +47,8 @@
 | `wall-law = linear` | 线性律 | **工具**（内核检验） |
 | `wall-law = fixed`，`tau-fixed`（`cf40307c`） | τ_w 大小固定 | **工具**：证明对数区应力偏差与 τ_w 大小基本无关（`s_es400_fix`） |
 | `wall-law = zero-stress`（原名 `none`，`5bb4de1b` 改名） | τ=0，零切应力滑移壁，不是无滑移 | **工具**（分项诊断中分离 τ_w 贡献） |
-| `inviscid-state = noslip` | 无粘 ghost 反转全部速度 | **无效**：Rusanov 下其耗散项钉住壁面速度并主导壁面力（平均力符号错误），HLLC 下发散。注意：此结论是在 3.1 标准格式上得到的，未在 ES 格式下重测 |
-| `damp-k`、`slip-ratio` | 附加 K·ρ(u_t − l·du_t/dn) 振荡抑制通量 | **无效**：所有 K、l 下该项都与 τ_WM 抵消，壁面合力≈0（3.1 标准格式上测得，未在 ES 下重测） |
+| ~~`inviscid-state = noslip`~~ | 已删除 | 曾证明无效：Rusanov 下壁面力符号错误，HLLC 下发散（3.1 标准格式） |
+| ~~`damp-k`、`slip-ratio`~~ | 已删除 | 曾证明无效：该项与 τ_WM 抵消，壁面合力≈0（3.1 标准格式） |
 | `debug` | 输出采样状态与 τ | **工具**（内核检验） |
 
 ### 2.3 恒流量驱动插件 `flowrate`
@@ -73,12 +73,14 @@
 | `negdivconf` 外部源 `wmsrc`、`baseadvec/elements.py` 开关 | 为上两项服务，默认关闭 | 随上两项 |
 | `wall-law = none` 置零修复（`2bd12b0b`） | 7abd9574 误删了 τ=0 | 修复 |
 
-## 四、已被算例证明无效 / 没用的改动（汇总）
+## 四、已被算例证明无效并已删除的改动（2026-10-16）
 
 1. `tfluxdiffp`（GPU 按解点并行内核）：无加速。
-2. `inviscid-state = noslip`：壁面力错误或发散（3.1 标准格式上测得）。
-3. `damp-k` / `slip-ratio`：与 τ_WM 抵消，壁面合力≈0（3.1 标准格式上测得）。
+2. `inviscid-state = noslip`：壁面力错误或发散。
+3. `damp-k` / `slip-ratio`：与 τ_WM 抵消，壁面合力≈0。
 4. `stress-deposit = volume`（均匀分摊，测试分支）：压制近壁湍流，τ_w 变差。
 
+删除后的回归（均与删除前逐位或逐字一致）：壁模型单点默认路径内核检验（k=1–4）、列平均内核检验、
+4 层网格整算例 t=10 解场（五个守恒量逐位相同）、熵守恒内核检验 level3（同线程数对比）。
+
 另有 `sample = point` 虽能工作，但已被 `column-mean` 取代；`wall-law = fixed/zero-stress/linear`、`ec`、`debug` 为诊断工具。
-上述 2、3 两项的代码目前仍在 `idea/wmles-es` 中；是否删除，待决定。

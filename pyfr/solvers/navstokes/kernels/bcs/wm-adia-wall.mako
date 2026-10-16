@@ -3,23 +3,14 @@
 <%include file='pyfr.solvers.euler.kernels.rsolvers.${rsolver}'/>
 <%include file='pyfr.solvers.navstokes.kernels.bcs.common'/>
 
-// Ghost state for the inviscid Riemann solve: slip mirror (default) or,
-// with inviscid-state = noslip, all velocity components reversed
+// Ghost state for the inviscid Riemann solve: slip mirror
 <%pyfr:macro name='bc_rsolve_state' params='ul, nl, ur'>
-% if wmghost == 'noslip':
-    ur[0] = ul[0];
-% for i in range(ndims):
-    ur[${i + 1}] = -ul[${i + 1}];
-% endfor
-    ur[${nvars - 1}] = ul[${nvars - 1}];
-% else:
     fpdtype_t nor = ${' + '.join(f'ul[{i + 1}]*nl[{i}]' for i in range(ndims))};
     ur[0] = ul[0];
 % for i in range(ndims):
     ur[${i + 1}] = ul[${i + 1}] - 2*nor*nl[${i}];
 % endfor
     ur[${nvars - 1}] = ul[${nvars - 1}];
-% endif
 </%pyfr:macro>
 
 // Boundary state for the gradients: as slp-adia-wall (develop semantics,
@@ -138,33 +129,9 @@
     ${pyfr.expand('bc_wm_tau', 'uwms', 'hwm', 'nl', 'ul[0]', 'tau')};
 % endif
 
-% if wmdamp:
-    // Oscillation suppression: penalise the mismatch between the wall-face
-    // tangential velocity and l times its normal derivative into the fluid
-    // (nl points out of the fluid, so -d/dn_in = nl.grad)
-    fpdtype_t pen[${ndims}];
-    {
-        fpdtype_t rcpr = 1.0/ul[0], lw = ${wmlfac}*hwm;
-        fpdtype_t uf[${ndims}], gn[${ndims}], ufn = 0, gnn = 0;
-% for i in range(ndims):
-        uf[${i}] = rcpr*ul[${i + 1}];
-        gn[${i}] = rcpr*(${' + '.join(f'nl[{j}]*(gradul[{j}][{i + 1}] - uf[{i}]*gradul[{j}][0])' for j in range(ndims))});
-        ufn += uf[${i}]*nl[${i}];
-        gnn += gn[${i}]*nl[${i}];
-% endfor
-% for i in range(ndims):
-        pen[${i}] = ${wmdamp}*ul[0]*(uf[${i}] - ufn*nl[${i}] + lw*(gn[${i}] - gnn*nl[${i}]));
-% endfor
-    }
-% endif
-
     ul[0] = magnl*ficomm[0];
 % for i in range(ndims):
-% if wmdamp:
-    ul[${i + 1}] = magnl*(ficomm[${i + 1}] + tau[${i}] + pen[${i}]);
-% else:
     ul[${i + 1}] = magnl*(ficomm[${i + 1}] + tau[${i}]);
-% endif
 % endfor
     ul[${nvars - 1}] = magnl*ficomm[${nvars - 1}];
 

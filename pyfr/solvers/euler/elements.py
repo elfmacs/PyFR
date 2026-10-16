@@ -276,15 +276,7 @@ class BaseFluidElements:
         be.pointwise.register('pyfr.solvers.euler.kernels.entvar')
         be.pointwise.register('pyfr.solvers.euler.kernels.entproj')
 
-        # Element-parallel kernel on CPUs, point-parallel kernel elsewhere
-        vkern = cfg.get('solver', 'volume-flux-kernel', 'auto')
-        if vkern == 'auto':
-            vkern = 'element' if be.name == 'openmp' else 'point'
-        if vkern not in {'element', 'point'}:
-            raise ValueError(f'Invalid volume-flux-kernel {vkern!r}')
-
-        be.pointwise.register(f'pyfr.solvers.euler.kernels.'
-                              f'{"tfluxdiff" if vkern == "element" else "tfluxdiffp"}')
+        be.pointwise.register('pyfr.solvers.euler.kernels.tfluxdiff')
 
         # Per-element (constant) metric terms and scratch space
         self._ec_smats = be.const_matrix(
@@ -317,26 +309,11 @@ class BaseFluidElements:
         if not viscous:
             self.kernels['tdisf'] = lambda uin: NullKernel()
             self.kernels['tdivtpcorf'] = lambda fout: NullKernel()
-        if vkern == 'element':
-            self.kernels['tfluxdiff'] = lambda uin: be.kernel(
-                'tfluxdiff', tplargs=tplargs, dims=[self.neles],
-                u=self.scal_upts[uin], uf=self._ec_ufpts,
-                smats=self._ec_smats, div=self._ec_div
-            )
-        else:
-            # Position along, and index of, each point's line per direction
-            pinfo = np.zeros((self.nupts, 2*self.ndims))
-            for d in range(self.ndims):
-                for l, line in enumerate(vix[d]):
-                    for a, k in enumerate(line):
-                        pinfo[k, 2*d:2*d + 2] = a, l
-
-            self._ec_pinfo = be.const_matrix(pinfo)
-            self.kernels['tfluxdiff'] = lambda uin: be.kernel(
-                'tfluxdiffp', tplargs=tplargs, dims=[self.nupts, self.neles],
-                u=self.scal_upts[uin], uf=self._ec_ufpts,
-                smats=self._ec_smats, pinfo=self._ec_pinfo, div=self._ec_div
-            )
+        self.kernels['tfluxdiff'] = lambda uin: be.kernel(
+            'tfluxdiff', tplargs=tplargs, dims=[self.neles],
+            u=self.scal_upts[uin], uf=self._ec_ufpts,
+            smats=self._ec_smats, div=self._ec_div
+        )
         if not viscous:
             self.kernels['tdivtconf'] = lambda fout: be.kernel(
                 'mul', self.opmat('M3'), self._scal_fpts,

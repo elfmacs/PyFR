@@ -300,28 +300,8 @@ class NavierStokesWMAdiaWallBCInters(NavierStokesBaseBCInters):
         if wmlaw == 'fixed':
             wmc['tau'] = cfg.getfloat(cfgsect, 'tau-fixed')
 
-        # Ghost state used by the inviscid Riemann solve at the wall
-        wmghost = cfg.get(cfgsect, 'inviscid-state', 'slip')
-        if wmghost not in {'slip', 'noslip'}:
-            raise ValueError(f'wm-adia-wall: unknown inviscid-state {wmghost}')
-
-        # Optional suppression of wall-tangential velocity oscillations: an
-        # extra flux damp-k*rho*(u_t - l*du_t/dn) with l = slip-ratio times
-        # the near-wall element height (= h/g_k for Gauss-Legendre points)
-        wmdamp = cfg.getfloat(cfgsect, 'damp-k', 0.0)
-        wmlfac = 0.0
-        if wmdamp and wmint:
-            raise ValueError('wm-adia-wall: damp-k requires sample = point')
-        if wmdamp:
-            p = elemap['hex'].basis.order
-            gk = (1 + np.sort(np.polynomial.legendre.leggauss(p + 1)[0])[k - 1])/2
-            wmlfac = cfg.getfloat(cfgsect, 'slip-ratio') / gk
-
         self._tplargs['wmlaw'] = wmlaw
         self._tplargs['wmc'] = wmc
-        self._tplargs['wmghost'] = wmghost
-        self._tplargs['wmdamp'] = wmdamp
-        self._tplargs['wmlfac'] = wmlfac
         self._tplargs['wmdebug'] = debug
         self._tplargs['wmint'] = wmint
 
