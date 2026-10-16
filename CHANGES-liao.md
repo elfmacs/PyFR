@@ -1,7 +1,8 @@
 # 本 fork 相对上游 PyFR 的改动记录（liao / idea 分支）
 
 上游基准：PyFR/PyFR `develop`，分叉点 `a20e39d9`（截至 2026-10-16 上游无新提交）。
-分支关系：`liao`（主干）→ `idea/wmles-es`（熵稳定格式 + 壁模型）→ `idea/wm-volsrc`（仅测试，未合并）。
+分支关系：`liao`（主干）→ `idea/wmles-es`（熵稳定格式 + 壁模型；2026-10-16 清理后合并进 `liao`）→ `idea/wm-volsrc`（仅测试，未合并）。
+合并前检验：标准 NS（不开新选项、上游 slp-adia-wall）同一随机状态下面通量与 RHS 与合并前的 `liao` 逐位相同。
 所有新功能都需在配置中显式开启；不开启时，Euler/NS 与 `liao` 逐位相同（同线程数），壁模型默认路径与改动前逐位相同。
 
 状态标记：
