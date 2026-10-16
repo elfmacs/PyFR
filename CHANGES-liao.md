@@ -89,8 +89,12 @@
 1. 删除诊断桩：`wall-law`（`linear`/`fixed`/`zero-stress`）、`tau-fixed`、`debug`；壁模型类不再保存只给测试用的属性（`_hwm`、`_uwms`、`_uwnames`、`_wmcols`）。
 2. `_set_ec_kernels` 的一维求导矩阵与端点插值改用 PyFR 自带的 `get_polybasis('line', ...)`，不再手写 Lagrange 公式（与手写版差 ≤1e-15 相对）。
 3. 检验脚本（`examples_src/wmles/dev/test_*_dev.py`）只从面通量/RHS 读 τ，列与 H 由脚本按几何独立求出。
+4. 去掉对后端私有接口的依赖：采样视图需要已分配的存储，原先手动遍历 `be._extents`/`_primary._pending` 提前分配寄存器库，改为公开的 `be.commit()`；`wmsrc` 用默认 `extent=None`（立即分配）。
+5. 采样状态改为每个寄存器库一个二维视图（整列解点 × 变量，按列给行步长，两侧壁面步长正负都已覆盖），外部参数只剩 `uwms, hwm`，取消 `order <= 8` 限制；点采样即权重为 0/1 的列，两种采样共用一条内核路径。
+6. 列平均权重改为用 PyFR 线基积分节点基函数，不再解 Vandermonde 方程（9 点时条件数 1.8e6，权重误差 1.4e-10；p=8 内核检验误差 1.2e-9 → 6.3e-13）。
 
 回归：
 - 壁模型内核（关闭 debug 后对比）：point、column-mean 的面通量与 RHS 与清理前逐位相同；
 - 4 层整算例 t=10 解场：只含第 1 项时与 `s_es400` 逐位相同；含第 2 项时相对差 2e-13（舍入，经混沌动力学放大）；
 - level3 熵守恒检验：熵误差、守恒误差仍在 1e-17～1e-15。
+- 第 4、5 项：point、column-mean 面通量与 RHS 与改动前逐位相同，4 层整算例 t=10 逐位相同；第 6 项只改变列平均权重的末位（point 路径不受影响）。

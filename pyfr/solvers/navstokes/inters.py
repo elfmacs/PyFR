@@ -2,6 +2,8 @@ import math
 import numpy as np
 
 from pyfr.exprs import npeval
+from pyfr.polys import get_polybasis
+from pyfr.quadrules import get_quadrule
 from pyfr.solvers.baseadvecdiff import (BaseAdvectionDiffusionBCInters,
                                         BaseAdvectionDiffusionIntInters,
                                         BaseAdvectionDiffusionMPIInters)
@@ -305,7 +307,6 @@ class NavierStokesWMAdiaWallBCInters(NavierStokesBaseBCInters):
         # first) and their wall distances, ordered exactly as the face arrays
         # (cf. _get_inter_arrays)
         tab, tref = self._sample_table(elemap['hex'], k)
-        cols = range(tab.shape[1]) if wmint else [k - 1]
         parts, reorder = [], []
         for etype, fidx, eidxs, idx in lhs.foreach():
             ele = elemap[etype]
@@ -316,8 +317,7 @@ class NavierStokesWMAdiaWallBCInters(NavierStokesBaseBCInters):
             nw = nw / np.linalg.norm(nw, axis=-1)[..., None]
 
             uis, hs = [], []
-            for j in cols:
-                ui = tab[fpts, j]
+            for ui in tab[fpts].transpose(2, 0, 1):
                 xu = ele.ploc_at_np('upts')[ui, :, ec]
                 h = -np.einsum('...i,...i', xu - xw, nw)
 
@@ -337,9 +337,6 @@ class NavierStokesWMAdiaWallBCInters(NavierStokesBaseBCInters):
         cidx = np.concatenate([p[1] for p in parts])[ro]
         hcol = np.concatenate([p[2] for p in parts], axis=1)[:, ro]
 
-        if wmint and tab.shape[1] > 9:
-            raise ValueError('wm-adia-wall: column-mean supports order <= 8')
-
         if wmint:
             # Wall-element height from each column point, h_j = H t_j/2 with
             # t_j the reference distance in [0, 2]; the column must be affine
@@ -349,35 +346,34 @@ class NavierStokesWMAdiaWallBCInters(NavierStokesBaseBCInters):
                 raise RuntimeError('wm-adia-wall: column-mean requires '
                                    'elements affine along the wall normal')
 
-            # Interpolatory weights of the column nodes over [0, 2], halved
-            V = np.vander(tref, increasing=True).T
-            m = np.array([2**(i + 1)/(i + 1) for i in range(len(tref))])
-            self._tplargs['wmw'] = [float(w) for w in np.linalg.solve(V, m)/2]
+            # Interpolatory weights of the column nodes, halved: the nodal
+            # basis on x = t - 1 integrated over [-1, 1]
+            lb = get_polybasis('line', len(tref) - 1, (tref - 1)[:, None])
+            q = get_quadrule('line', 'gauss-legendre', len(tref))
+            wmw = q.wts @ lb.nodal_basis_at(q.pts[:, None]) / 2
+            self._tplargs['wmw'] = [float(w) for w in wmw]
         else:
-            self._tplargs['wmw'] = [1.0]
-            hs = hcol[0]
+            self._tplargs['wmw'] = [float(j == k - 1) for j in range(len(tref))]
+            hs = hcol[k - 1]
 
-        # One view of the sampled state per solution register bank.  Views
-        # need committed storage, but the banks' extents are otherwise only
-        # committed after the kernels are generated; so commit them here
-        banks = elemap['hex'].scal_upts
-        bids = {id(b) for b in banks}
-        for name, ext in list(be._extents.items()):
-            if any(id(o) in bids for o, _ in ext._primary._pending):
-                be.commit_extent(ext)
-                del be._extents[name]
+        # The sampled points of each column are equally spaced in the
+        # solution point numbering, so one view per register bank with a
+        # per-column row stride covers them all
+        dui = np.diff(uidxs, axis=0)
+        if (dui != dui[0]).any():
+            raise RuntimeError('wm-adia-wall: unexpected column numbering')
 
-        uwnames = ['uwms'] + [f'uwms{j}' for j in range(1, len(uidxs))]
-        uwms = [
-            dict(zip(uwnames, (be.view(np.full(len(cidx), b.mid), uidx, cidx,
-                                       vshape=(self.nvars,))
-                               for uidx in uidxs)))
-            for b in banks
-        ]
+        # Views need allocated storage; the register banks are otherwise
+        # only allocated after the kernels are generated
+        be.commit()
+        uwms = [be.view(np.full(len(cidx), b.mid), uidxs[0], cidx, dui[0],
+                        vshape=(len(uidxs), self.nvars))
+                for b in elemap['hex'].scal_upts]
 
         extrns = self._external_args | {
-            n: f'in view fpdtype_t[{self.nvars}]' for n in uwnames
-        } | {'hwm': 'in fpdtype_t'}
+            'uwms': f'in view fpdtype_t[{len(uidxs)}][{self.nvars}]',
+            'hwm': 'in fpdtype_t'
+        }
         extvals = self._external_vals | {
             'hwm': be.const_matrix(hs[None, :])
         }
@@ -385,7 +381,8 @@ class NavierStokesWMAdiaWallBCInters(NavierStokesBaseBCInters):
         self.kernels['comm_flux'] = lambda uin: self._be.kernel(
             'bccflux', tplargs=self._tplargs, dims=[self.ninterfpts],
             extrns=extrns, ul=self.scal_lhs, gradul=self._vect_lhs,
-            nl=self._pnorm_lhs, artvisc=self.artvisc, **uwms[uin], **extvals
+            nl=self._pnorm_lhs, artvisc=self.artvisc, uwms=uwms[uin],
+            **extvals
         )
 
     @staticmethod

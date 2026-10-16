@@ -80,7 +80,7 @@
 </%pyfr:macro>
 
 <%pyfr:macro name='bc_common_flux_state' params='ul, gradul, artviscl, nl, magnl'
-              externs='uwms, uwms1, uwms2, uwms3, uwms4, uwms5, uwms6, uwms7, uwms8, hwm'>
+              externs='uwms, hwm'>
     // Inviscid part: slip wall
     fpdtype_t ur[${nvars}];
     ${pyfr.expand('bc_rsolve_state', 'ul', 'nl', 'ur')};
@@ -90,17 +90,14 @@
 
     // Viscous part: momentum flux into the wall from the wall model
     fpdtype_t tau[${ndims}];
-% if wmint:
-    // Mean state along the normal column of solution points above this flux
-    // point (interpolatory weights of the column, summing to one)
+    // Sampled state: a weighted sum over the normal column of solution
+    // points above this flux point, the column mean (weights sum to one) or
+    // a single point (weight one)
     fpdtype_t usm[${nvars}];
 % for i in range(nvars):
-    usm[${i}] = ${' + '.join(f'{w!r}*uwms{j or ""}[{i}]' for j, w in enumerate(wmw))};
+    usm[${i}] = ${' + '.join(f'{w!r}*uwms[{j}][{i}]' for j, w in enumerate(wmw) if w)};
 % endfor
     ${pyfr.expand('bc_wm_tau', 'usm', 'hwm', 'nl', 'ul[0]', 'tau')};
-% else:
-    ${pyfr.expand('bc_wm_tau', 'uwms', 'hwm', 'nl', 'ul[0]', 'tau')};
-% endif
 
     ul[0] = magnl*ficomm[0];
 % for i in range(ndims):
