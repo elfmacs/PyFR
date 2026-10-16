@@ -68,9 +68,9 @@
 | 改动 | 说明 | 状态 |
 |---|---|---|
 | `stress-deposit = face` | 默认：τ_w 作面通量，经提升按 −l_a(−1) 交替注入各解点 | 对照 |
-| `stress-deposit = volume`（`7abd9574`） | τ_w 作贴壁列的均匀体积汇 | **无效**：锯齿消失但近壁解析应力被压没、湍流强度降约 38%、τ_w +8.7%（`s_es400_cmvol`） |
+| ~~`stress-deposit = volume`~~（原 `7abd9574`） | 已删除 | 曾证明有害：近壁解析应力被压没、湍流强度降约 38%、τ_w +8.7%（`s_es400_cmvol`） |
 | `stress-deposit = first-point`（`3e1d2bc5`） | τ_w 全部作第一离壁解点上的汇 | **有效**：第一层速度误差 p=3 −11.8%→−3.0%，p=4 −5.9%→+0.9%；对数区 −uv⁺、uu⁺ 偏高约减半（`s_es400_cmfp`、`s_p4_cmfp`）。尚无稳定性证明 |
-| `negdivconf` 外部源 `wmsrc`、`baseadvec/elements.py` 开关 | 为上两项服务，默认关闭 | 随上两项 |
+| `negdivconf` 外部源 `wmsrc`、`baseadvec/elements.py` 开关 | 为第一离壁点服务，默认关闭 | 随第一离壁点 |
 | `wall-law = none` 置零修复（`2bd12b0b`） | 7abd9574 误删了 τ=0 | 修复 |
 
 ## 四、已被算例证明无效并已删除的改动（2026-10-16）
