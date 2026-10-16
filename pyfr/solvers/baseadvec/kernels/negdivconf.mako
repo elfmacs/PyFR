@@ -16,6 +16,12 @@ fpdtype_t src[${nvars}] = {};
     ${pyfr.expand(name, 't', 'u', 'ploc', 'src')};
 % endfor
 
+% if esdiv:
+% for i in range(nvars):
+    tdivtconf[${i}] += esdiv[${i}];
+% endfor
+
+% endif
 % for i in range(nvars):
     tdivtconf[${i}] = -rcpdjac*tdivtconf[${i}] + src[${i}];
 % endfor

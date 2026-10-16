@@ -31,10 +31,15 @@
     ${pyfr.expand('transform_grad', gradu, smats, rcpdjac)};
 % endif
 
+% if noinviscid:
+    // Viscous flux only (inviscid part by flux differencing)
+    fpdtype_t ftemp[${ndims}][${nvars}] = {};
+% else:
     // Compute the flux (F = Fi + Fv)
     fpdtype_t ftemp[${ndims}][${nvars}];
     fpdtype_t p, v[${ndims}];
     ${pyfr.expand('inviscid_flux', 'u', 'ftemp', 'p', 'v')};
+% endif
     ${pyfr.expand('viscous_flux_add', 'u', gradu, 'ftemp')};
 % if shock_capturing == 'artificial-viscosity':
     fpdtype_t artvisc;

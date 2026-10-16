@@ -190,6 +190,133 @@ class BaseFluidElements:
             return wkerns[0]
 
 
+    def _set_ec_kernels(self, viscous=False):
+        from pyfr.backends.base import NullKernel
+        from pyfr.polys import get_polybasis
+        from pyfr.quadrules import get_quadrule
+
+        cfg, basis = self.cfg, self.basis
+        vflux = cfg.get('solver', 'volume-flux')
+        if vflux != 'entropy-conservative':
+            raise ValueError(f'Invalid volume-flux {vflux!r}')
+
+        # Restrictions of the first implementation
+        if self.basis.name != 'hex':
+            raise ValueError('volume-flux requires hexahedral elements')
+        if cfg.get('solver-elements-hex', 'soln-pts') != 'gauss-legendre':
+            raise ValueError('volume-flux requires gauss-legendre soln-pts')
+        if cfg.get('solver-interfaces-quad', 'flux-pts') != 'gauss-legendre':
+            raise ValueError('volume-flux requires gauss-legendre flux-pts')
+        if self.antialias:
+            raise ValueError('volume-flux is incompatible with anti-aliasing')
+        if cfg.get('solver', 'shock-capturing', 'none') != 'none':
+            raise ValueError('volume-flux is incompatible with shock-capturing')
+        if self._be.fpdtype != np.float64:
+            raise ValueError('volume-flux is only validated in double precision')
+
+        # Metric terms must be constant within each element (affine)
+        smats = self.smat_at_np('upts')
+        rcpdjac = self.rcpdjac_at_np('upts')
+        if (np.abs(smats - smats[:, :1]).max() > 1e-10*np.abs(smats).max() or
+            np.abs(rcpdjac - rcpdjac[:1]).max() > 1e-10*np.abs(rcpdjac).max()):
+            raise ValueError('volume-flux requires affine elements')
+
+        # One dimensional operators on the Gauss points
+        n1 = basis.order + 1
+        q = get_quadrule('line', 'gauss-legendre', n1)
+        x1, w1 = q.pts, q.wts
+        lb = get_polybasis('line', basis.order, x1[:, None])
+        D1 = lb.jac_nodal_basis_at(x1[:, None])[0].T
+        Vf = lb.nodal_basis_at(np.array([[-1.0], [1.0]]))
+        B = np.diag([-1.0, 1.0])
+        S0 = np.diag(w1) @ D1 - 0.5*Vf.T @ B @ Vf
+
+        # Lines of solution points and their end flux points per direction
+        upts, fpts, nfpts = basis.upts, basis.fpts, basis.norm_fpts
+        pos = lambda c: int(np.argmin(np.abs(x1 - c)))
+        vix, fix = [], []
+        for d in range(self.ndims):
+            o = [e for e in range(self.ndims) if e != d]
+            lines = {}
+            for k, xk in enumerate(upts):
+                key = tuple(pos(xk[e]) for e in o)
+                lines.setdefault(key, [None]*n1)[pos(xk[d])] = k
+
+            ends = {}
+            for f, xf in enumerate(fpts):
+                if abs(abs(nfpts[f, d]) - 1) < 1e-12:
+                    key = tuple(pos(xf[e]) for e in o)
+                    ends.setdefault(key, [None, None])[int(nfpts[f, d] > 0)] = f
+
+            keys = sorted(lines)
+            vix.append([lines[k] for k in keys])
+            fix.append([ends[k] for k in keys])
+
+            if (len(keys) != n1**2 or
+                any(None in r for r in vix[-1] + fix[-1])):
+                raise RuntimeError('Unable to identify solution point lines')
+
+        tplargs = {
+            'ndims': self.ndims, 'nvars': self.nvars,
+            'nupts': self.nupts, 'nfpts': self.nfpts,
+            'c': self.cfg.items_as('constants', float),
+            'S0': S0, 'Vf': Vf, 'w1': w1, 'vix': vix, 'fix': fix
+        }
+
+        be = self._be
+        be.pointwise.register('pyfr.solvers.euler.kernels.entvar')
+        be.pointwise.register('pyfr.solvers.euler.kernels.entproj')
+
+        be.pointwise.register('pyfr.solvers.euler.kernels.tfluxdiff')
+
+        # Per-element (constant) metric terms and scratch space
+        self._ec_smats = be.const_matrix(
+            np.ascontiguousarray(smats[:, 0]), tags={'align'}
+        )
+        self._ec_vupts = be.matrix((self.nupts, self.nvars, self.neles),
+                                   tags={'align'})
+        self._ec_div = be.matrix((self.nupts, self.nvars, self.neles),
+                                 tags={'align'})
+        self._ec_ufpts = be.matrix((self.nfpts, self.nvars, self.neles),
+                                   tags={'align'})
+
+        # Entropy projected interpolation to the flux points
+        def disu(uin):
+            return be.ordered_meta_kernel([
+                be.kernel('entvar', tplargs=tplargs,
+                          dims=[self.nupts, self.neles],
+                          u=self.scal_upts[uin], v=self._ec_vupts),
+                be.kernel('mul', self.opmat('M0'), self._ec_vupts,
+                          out=self._scal_fpts),
+                be.kernel('entproj', tplargs=tplargs,
+                          dims=[self.nfpts, self.neles], u=self._scal_fpts,
+                          uc=self._ec_ufpts)
+            ])
+
+        self.kernels['disu'] = disu
+
+        # Without viscous terms there is nothing left for tdisf/tdivtpcorf;
+        # with them these kernels handle the viscous flux only
+        if not viscous:
+            self.kernels['tdisf'] = lambda uin: NullKernel()
+            self.kernels['tdivtpcorf'] = lambda fout: NullKernel()
+        self.kernels['tfluxdiff'] = lambda uin: be.kernel(
+            'tfluxdiff', tplargs=tplargs, dims=[self.neles],
+            u=self.scal_upts[uin], uf=self._ec_ufpts,
+            smats=self._ec_smats, div=self._ec_div
+        )
+        if not viscous:
+            self.kernels['tdivtconf'] = lambda fout: be.kernel(
+                'mul', self.opmat('M3'), self._scal_fpts,
+                out=self.scal_upts[fout], beta=0.0
+            )
+
+        # Add the flux differencing divergence in negdivconf
+        self._srctplargs['esdiv'] = True
+        self.set_external('esdiv', f'in fpdtype_t[{self.nvars}]',
+                          value=self._ec_div)
+
+
 class EulerElements(BaseFluidElements, BaseAdvectionElements):
     def set_backend(self, *args, **kwargs):
         super().set_backend(*args, **kwargs)
@@ -248,3 +375,7 @@ class EulerElements(BaseFluidElements, BaseAdvectionElements):
             self.kernels['tdisf'] = lambda uin: slicedk(k(uin) for k in tdisf)
         else:
             self.kernels['tdisf'] = lambda: slicedk(k() for k in tdisf)
+
+        # Entropy conservative flux differencing replaces tdisf/tdivtpcorf
+        if self.cfg.get('solver', 'volume-flux', 'standard') != 'standard':
+            self._set_ec_kernels()

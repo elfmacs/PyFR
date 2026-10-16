@@ -1,6 +1,9 @@
+import math
 import numpy as np
 
 from pyfr.exprs import npeval
+from pyfr.polys import get_polybasis
+from pyfr.quadrules import get_quadrule
 from pyfr.solvers.baseadvecdiff import (BaseAdvectionDiffusionBCInters,
                                         BaseAdvectionDiffusionIntInters,
                                         BaseAdvectionDiffusionMPIInters)
@@ -255,3 +258,163 @@ class NavierStokesCharRiemInvPressureBCInters(PressureBCMixin,
                                               NavierStokesBaseBCInters):
     type = 'char-riem-inv-pressure'
     cflux_state = 'ghost'
+
+
+class NavierStokesWMAdiaWallBCInters(NavierStokesBaseBCInters):
+    type = 'wm-adia-wall'
+    cflux_state = None
+
+    def __init__(self, be, lhs, elemap, cfgsect, cfg, bccomm):
+        super().__init__(be, lhs, elemap, cfgsect, cfg, bccomm)
+
+        if self._tplargs['visc_corr'] != 'none':
+            raise ValueError('wm-adia-wall requires constant viscosity')
+
+        if any(etype != 'hex' for etype, *_ in lhs.foreach()):
+            raise ValueError('wm-adia-wall only supports hex elements')
+
+        # Velocity input: the state at one solution point (sample = point,
+        # sample-point k) or the mean along the column of solution points
+        # normal to the wall (sample = column-mean), matched to the mean of
+        # the wall law over the wall-element height
+        sample = cfg.get(cfgsect, 'sample', 'point')
+        if sample not in {'point', 'column-mean'}:
+            raise ValueError(f'wm-adia-wall: unknown sample {sample}')
+
+        wmint = sample == 'column-mean'
+        k = 1 if wmint else cfg.getint(cfgsect, 'sample-point')
+
+        # LOG-EXP defaults: Zhang, Zhou, Yang & Zhang, arXiv:2104.09054,
+        # eq. (10); kappa = 0.4 from their section I
+        wmc = {'niters': cfg.getint(cfgsect, 'newton-iters', 4),
+               'umin': 1e-30}
+        for cn, cv in [('kappa', 0.4), ('A', 11.630), ('B', 7.194),
+                       ('C', -4.472), ('D', 2.766)]:
+            wmc[cn] = cfg.getfloat(cfgsect, cn, cv)
+
+        self._tplargs['wmc'] = wmc
+        self._tplargs['wmint'] = wmint
+
+        # Taylor series of the mean LOG-EXP law, used for Y < wmy0
+        kp, a, b, cc, d = (wmc[cn] for cn in ['kappa', 'A', 'B', 'C', 'D'])
+        self._tplargs['wmy0'] = 0.3
+        self._tplargs['wmser'] = [
+            ((-1)**(n + 1)*math.factorial(n - 1)*kp**(n - 1) - a*(-1/b)**n
+             - cc*(-1/d)**n) / math.factorial(n + 1) for n in range(1, 13)
+        ]
+
+        # Solution points of the normal column above each flux point (nearest
+        # first) and their wall distances, ordered exactly as the face arrays
+        # (cf. _get_inter_arrays)
+        tab, tref = self._sample_table(elemap['hex'], k)
+        parts, reorder = [], []
+        for etype, fidx, eidxs, idx in lhs.foreach():
+            ele = elemap[etype]
+            fpts = ele.srtd_face_fpts[fidx][eidxs]
+            ec = eidxs[:, None]
+            xw = ele.plocfpts[fpts, ec]
+            nw = ele._pnorm_fpts[fpts, ec]
+            nw = nw / np.linalg.norm(nw, axis=-1)[..., None]
+
+            uis, hs = [], []
+            for ui in tab[fpts].transpose(2, 0, 1):
+                xu = ele.ploc_at_np('upts')[ui, :, ec]
+                h = -np.einsum('...i,...i', xu - xw, nw)
+
+                if np.any(h <= 0):
+                    raise RuntimeError('wm-adia-wall: non-positive sample '
+                                       'height')
+
+                uis.append(ui.ravel())
+                hs.append(h.ravel())
+
+            parts.append((np.array(uis), np.repeat(eidxs, fpts.shape[1]),
+                          np.array(hs)))
+            reorder.append(np.repeat(idx, ele.nfacefpts[fidx]))
+
+        ro = np.argsort(np.concatenate(reorder), kind='stable')[self._perm]
+        uidxs = np.concatenate([p[0] for p in parts], axis=1)[:, ro]
+        cidx = np.concatenate([p[1] for p in parts])[ro]
+        hcol = np.concatenate([p[2] for p in parts], axis=1)[:, ro]
+
+        if wmint:
+            # Wall-element height from each column point, h_j = H t_j/2 with
+            # t_j the reference distance in [0, 2]; the column must be affine
+            Hs = 2*hcol / tref[:, None]
+            hs = Hs.mean(axis=0)
+            if np.abs(Hs/hs - 1).max() > 1e-8:
+                raise RuntimeError('wm-adia-wall: column-mean requires '
+                                   'elements affine along the wall normal')
+
+            # Interpolatory weights of the column nodes, halved: the nodal
+            # basis on x = t - 1 integrated over [-1, 1]
+            lb = get_polybasis('line', len(tref) - 1, (tref - 1)[:, None])
+            q = get_quadrule('line', 'gauss-legendre', len(tref))
+            wmw = q.wts @ lb.nodal_basis_at(q.pts[:, None]) / 2
+            self._tplargs['wmw'] = [float(w) for w in wmw]
+        else:
+            self._tplargs['wmw'] = [float(j == k - 1) for j in range(len(tref))]
+            hs = hcol[k - 1]
+
+        # The sampled points of each column are equally spaced in the
+        # solution point numbering, so one view per register bank with a
+        # per-column row stride covers them all
+        dui = np.diff(uidxs, axis=0)
+        if (dui != dui[0]).any():
+            raise RuntimeError('wm-adia-wall: unexpected column numbering')
+
+        # Views need allocated storage; the register banks are otherwise
+        # only allocated after the kernels are generated
+        be.commit()
+        uwms = [be.view(np.full(len(cidx), b.mid), uidxs[0], cidx, dui[0],
+                        vshape=(len(uidxs), self.nvars))
+                for b in elemap['hex'].scal_upts]
+
+        extrns = self._external_args | {
+            'uwms': f'in view fpdtype_t[{len(uidxs)}][{self.nvars}]',
+            'hwm': 'in fpdtype_t'
+        }
+        extvals = self._external_vals | {
+            'hwm': be.const_matrix(hs[None, :])
+        }
+
+        self.kernels['comm_flux'] = lambda uin: self._be.kernel(
+            'bccflux', tplargs=self._tplargs, dims=[self.ninterfpts],
+            extrns=extrns, ul=self.scal_lhs, gradul=self._vect_lhs,
+            nl=self._pnorm_lhs, artvisc=self.artvisc, uwms=uwms[uin],
+            **extvals
+        )
+
+    @staticmethod
+    def _sample_table(ele, k):
+        basis = ele.basis
+        upts, fpts = np.array(basis.upts), np.array(basis.fpts)
+        tab = np.empty((len(fpts), basis.order + 1), dtype=int)
+        tref = None
+
+        for (kind, proj, norm), ffpts in zip(basis.faces, basis.facefpts):
+            nref = np.array(norm, dtype=float)
+
+            for i in ffpts:
+                d = upts - fpts[i]
+                tang = d - np.outer(d @ nref, nref)
+                col = np.where(np.linalg.norm(tang, axis=1) < 1e-10)[0]
+
+                if len(col) != basis.order + 1:
+                    raise ValueError('wm-adia-wall requires solution points '
+                                     'aligned with face flux points')
+                if not 1 <= k <= len(col):
+                    raise ValueError(f'sample-point must be in '
+                                     f'1..{len(col)}')
+
+                # Order the column by distance from the face
+                t = -(d[col] @ nref)
+                o = np.argsort(t)
+                tab[i] = col[o]
+
+                if tref is None:
+                    tref = t[o]
+                elif np.abs(t[o] - tref).max() > 1e-10:
+                    raise ValueError('wm-adia-wall: columns differ')
+
+        return tab, tref

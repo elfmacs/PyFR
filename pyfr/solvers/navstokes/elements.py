@@ -52,8 +52,18 @@ class NavierStokesElements(BaseFluidElements, BaseAdvectionDiffusionElements):
             'jac_exprs': self.basis.jac_exprs,
             'interp_expr': self.basis.interp_expr,
             'shock_capturing': shock_capturing,
-            'visc_corr': visc_corr
+            'visc_corr': visc_corr,
+            'noinviscid': False
         }
+
+        # With entropy conservative flux differencing tflux only provides
+        # the viscous flux
+        ecvol = self.cfg.get('solver', 'volume-flux', 'standard') != 'standard'
+        if ecvol:
+            if shock_capturing == 'artificial-viscosity':
+                raise ValueError('volume-flux is incompatible with '
+                                 'artificial viscosity')
+            tplargs['noinviscid'] = True
 
         # Helpers
         r, s = self.mesh_regions, self._slice_mat
@@ -124,3 +134,6 @@ class NavierStokesElements(BaseFluidElements, BaseAdvectionDiffusionElements):
                 )
 
         self.kernels[kname] = tdisf_k
+
+        if ecvol:
+            self._set_ec_kernels(viscous=True)

@@ -104,6 +104,10 @@ class BaseAdvectionSystem(BaseSystem):
         for l in k['eles/tdisf']:
             g_flux_div.add(l, deps=deps(l, 'eles/qptsu'))
 
+        # Entropy conservative flux differencing (volume-flux option)
+        for l in k['eles/tfluxdiff']:
+            g_flux_div.add(l)
+
         # Compute the transformed divergence of the partially corrected flux
         for l in k['eles/tdivtpcorf']:
             g_flux_div.add(l, deps=deps(l, 'eles/tdisf'))
@@ -121,12 +125,14 @@ class BaseAdvectionSystem(BaseSystem):
 
         # Compute the transformed divergence of the corrected flux
         for l in k['eles/tdivtconf']:
-            ldeps = deps(l, 'eles/tdivtpcorf') + k['mpiint/comm_flux']
+            ldeps = deps(l, 'eles/tdivtpcorf', 'eles/tfluxdiff')
+            ldeps += k['mpiint/comm_flux']
             g_flux_div.add(l, deps=ldeps)
 
         # Obtain the physical divergence of the corrected flux
         for l in k['eles/negdivconf']:
-            g_flux_div.add(l, deps=deps(l, 'eles/tdivtconf'))
+            g_flux_div.add(l, deps=deps(l, 'eles/tdivtconf',
+                                        'eles/tfluxdiff'))
 
         kgroup = [k['eles/qptsu'], k['eles/tdisf'], k['eles/tdivtpcorf'],
                   k['eles/tdivtconf'], k['eles/negdivconf']]
