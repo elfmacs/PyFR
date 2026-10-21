@@ -193,11 +193,6 @@ class TavgPlugin(PostactionMixin, RegionMixin, BackendMixin, BaseSolnPlugin):
         # Reset the output clock to when averaging actually begins
         self.tout_last = intg.tcurr
 
-        # Initialize host arrays for output processing
-        nexprs = len(self.aexprs)
-        self.accex = [np.zeros((nexprs, d['nupts'], d['neles']))
-                      for d in self._tavg_data.values()]
-
     def _prepare_meta(self, intg):
         comm, rank, root = get_comm_rank_root()
 
@@ -222,13 +217,18 @@ class TavgPlugin(PostactionMixin, RegionMixin, BackendMixin, BaseSolnPlugin):
     def _prepare_data(self, intg):
         wts = 2*(intg.tcurr - self.tstart_acc)
 
-        # Normalise the accumulated averages
-        avg = [a / wts for a in self.accex]
-
-        # Build grouped data per element type
+        # Fetch the accumulators and normalise them in place; get() always
+        # returns a freshly allocated host array, so no host copy of the
+        # accumulators needs to persist between writes.  Normalisation is
+        # done in double precision, as before, also for Kahan accumulators
         data = {}
-        for i, (idx, etype, rgn) in enumerate(self._ele_regions):
-            data[etype] = {'avg': avg[i].transpose(2, 0, 1)}
+        for idx, etype, rgn in self._ele_regions:
+            avg = self._tavg_data[etype]['acc'].get()
+            avg = avg.astype(np.float64, copy=False)
+            avg /= wts
+
+            # (nupts, nexprs, neles) -> (neles, nexprs, nupts)
+            data[etype] = {'avg': avg.transpose(2, 1, 0)}
 
         return data, self._prepare_meta(intg)
 
@@ -237,7 +237,6 @@ class TavgPlugin(PostactionMixin, RegionMixin, BackendMixin, BaseSolnPlugin):
         if not self._started:
             return
 
-        self._fetch_accumulators()
         data, metadata = self._prepare_data(intg)
         self._writer.write(data, intg.tcurr, metadata, self._async_timeout)
 
@@ -269,10 +268,7 @@ class TavgPlugin(PostactionMixin, RegionMixin, BackendMixin, BaseSolnPlugin):
             self.prevt = intg.tcurr
 
             if dowrite:
-                # Transfer device data to host for output processing
-                self._fetch_accumulators()
-
-                # Prepare the data and metadata
+                # Transfer device data to host and prepare it for output
                 data, metadata = self._prepare_data(intg)
 
                 # Prepare a callback to kick off any postactions
@@ -303,10 +299,6 @@ class TavgPlugin(PostactionMixin, RegionMixin, BackendMixin, BaseSolnPlugin):
 
     def _zero_accumulators(self):
         self.backend.run_kernels(self._get_zero_kerns())
-
-    def _fetch_accumulators(self):
-        for i, d in enumerate(self._tavg_data.values()):
-            self.accex[i][:] = d['acc'].get().transpose(1, 0, 2)
 
     def finalise(self, intg):
         self._writer.flush()
