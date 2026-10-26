@@ -160,6 +160,12 @@ class TavgPlugin(PostactionMixin, RegionMixin, BackendMixin, BaseSolnPlugin):
                 acc_comp=acc_comp, nupts=nupts, neles=neles, tplargs=tplargs
             )
 
+        # Size the host transfer buffer for fetching the accumulators now,
+        # rather than at the first write when memory may be tighter
+        if hasattr(backend, 'xfer_buf'):
+            nbytes = max(d['acc'].nbytes for d in self._tavg_data.values())
+            backend.xfer_buf((nbytes,), np.uint8)
+
     @memoize
     def _get_accum_kerns(self, uidx):
         backend = self.backend
@@ -193,11 +199,6 @@ class TavgPlugin(PostactionMixin, RegionMixin, BackendMixin, BaseSolnPlugin):
         # Reset the output clock to when averaging actually begins
         self.tout_last = intg.tcurr
 
-        # Initialize host arrays for output processing
-        nexprs = len(self.aexprs)
-        self.accex = [np.zeros((nexprs, d['nupts'], d['neles']))
-                      for d in self._tavg_data.values()]
-
     def _prepare_meta(self, intg):
         comm, rank, root = get_comm_rank_root()
 
@@ -222,13 +223,18 @@ class TavgPlugin(PostactionMixin, RegionMixin, BackendMixin, BaseSolnPlugin):
     def _prepare_data(self, intg):
         wts = 2*(intg.tcurr - self.tstart_acc)
 
-        # Normalise the accumulated averages
-        avg = [a / wts for a in self.accex]
-
-        # Build grouped data per element type
+        # Fetch the accumulators and normalise them in place; get() always
+        # returns a freshly allocated host array, so no host copy of the
+        # accumulators needs to persist between writes.  Normalisation is
+        # done in double precision, as before, also for Kahan accumulators
         data = {}
-        for i, (idx, etype, rgn) in enumerate(self._ele_regions):
-            data[etype] = {'avg': avg[i].transpose(2, 0, 1)}
+        for idx, etype, rgn in self._ele_regions:
+            avg = self._tavg_data[etype]['acc'].get()
+            avg = avg.astype(np.float64, copy=False)
+            avg /= wts
+
+            # (nupts, nexprs, neles) -> (neles, nexprs, nupts)
+            data[etype] = {'avg': avg.transpose(2, 1, 0)}
 
         return data, self._prepare_meta(intg)
 
@@ -237,15 +243,37 @@ class TavgPlugin(PostactionMixin, RegionMixin, BackendMixin, BaseSolnPlugin):
         if not self._started:
             return
 
-        self._fetch_accumulators()
+        # Accumulate up to the current time first; the averages are
+        # normalised by the time since the start of the window, so writing
+        # between accumulation steps would bias them all low by the time
+        # since the last accumulation (and the variances far more)
+        if intg.tcurr > self.prevt:
+            self._accumulate(intg)
+
         data, metadata = self._prepare_data(intg)
         self._writer.write(data, intg.tcurr, metadata, self._async_timeout)
+
+    def _accumulate(self, intg):
+        # Compute gradients on device if needed
+        if self._has_grads:
+            intg.compute_grads()
+
+        # Compute the weight for the trapezoidal rule
+        dt = intg.tcurr - self.prevt
+
+        # Bind the weight and run accumulation kernels
+        kerns = self._get_accum_kerns(intg.idxcurr)
+        for kern in kerns:
+            kern.bind(wdt=dt)
+        self.backend.run_kernels(kerns)
+        self.prevt = intg.tcurr
 
     def __call__(self, intg):
         self._writer.probe()
 
         # If necessary, run the start-up routines
-        if not self._started:
+        firstcall = not self._started
+        if firstcall:
             self._init_accumex(intg)
             self._started = True
 
@@ -253,26 +281,15 @@ class TavgPlugin(PostactionMixin, RegionMixin, BackendMixin, BaseSolnPlugin):
         dowrite = intg.tcurr - self.tout_last >= self.dtout - self.tol
         doaccum = intg.nacptsteps % self._accum_nsteps == 0
 
-        if dowrite or doaccum:
-            # Compute gradients on device if needed
-            if self._has_grads:
-                intg.compute_grads()
-
-            # Compute the weight for the trapezoidal rule
-            dt = intg.tcurr - self.prevt
-
-            # Bind the weight and run accumulation kernels
-            kerns = self._get_accum_kerns(intg.idxcurr)
-            for kern in kerns:
-                kern.bind(wdt=dt)
-            self.backend.run_kernels(kerns)
-            self.prevt = intg.tcurr
+        # On the first call accumulate with a zero weight so that the
+        # trapezoidal rule's previous sample is set; otherwise when
+        # restarting the first interval is integrated against zero
+        # (from 4b922079 on fix/tavg-first-window)
+        if dowrite or doaccum or firstcall:
+            self._accumulate(intg)
 
             if dowrite:
-                # Transfer device data to host for output processing
-                self._fetch_accumulators()
-
-                # Prepare the data and metadata
+                # Transfer device data to host and prepare it for output
                 data, metadata = self._prepare_data(intg)
 
                 # Prepare a callback to kick off any postactions
@@ -303,10 +320,6 @@ class TavgPlugin(PostactionMixin, RegionMixin, BackendMixin, BaseSolnPlugin):
 
     def _zero_accumulators(self):
         self.backend.run_kernels(self._get_zero_kerns())
-
-    def _fetch_accumulators(self):
-        for i, d in enumerate(self._tavg_data.values()):
-            self.accex[i][:] = d['acc'].get().transpose(1, 0, 2)
 
     def finalise(self, intg):
         self._writer.flush()

@@ -224,7 +224,23 @@ class BaseIntegrator(metaclass=RegisterMeta):
         if self.triggers:
             self.triggers.evaluate(self)
 
-        # Fire off the plugins and tally up the runtime
+        # Fire off the plugins and tally up the runtime; should a plugin fail
+        # (a write, say) the solution is between steps and consistent, so
+        # first have the plugins which can take non-destructive snapshots
+        # (solution writer, time averages) write out what they hold
+        try:
+            self._call_plugins(wtimes)
+        except Exception:
+            self._emergency_write()
+            raise
+
+        # Update the progress bar
+        self.progress(self.tcurr)
+
+        # Abort if plugins request it
+        self._check_abort()
+
+    def _call_plugins(self, wtimes):
         for plugin in self.plugins:
             # Skip disabled plugins
             if not plugin.enabled:
@@ -249,11 +265,21 @@ class BaseIntegrator(metaclass=RegisterMeta):
 
             wtimes[plugin.name, plugin.suffix] += dt
 
-        # Update the progress bar
-        self.progress(self.tcurr)
+    def _emergency_write(self):
+        from pyfr.plugins.base import BasePlugin
 
-        # Abort if plugins request it
-        self._check_abort()
+        for plugin in self.plugins:
+            if type(plugin).trigger_write is BasePlugin.trigger_write:
+                continue
+
+            try:
+                plugin.trigger_write(self)
+
+                if (writer := getattr(plugin, '_writer', None)):
+                    writer.flush()
+            except Exception as e:
+                print(f'Emergency write by {plugin.name} failed: {e!r}',
+                      file=sys.stderr)
 
     def _plugin_should_run(self, plugin):
         # Trigger scheduling

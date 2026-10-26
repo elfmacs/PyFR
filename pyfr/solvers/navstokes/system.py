@@ -4,6 +4,9 @@ from pyfr.solvers.navstokes.inters import (NavierStokesBaseBCInters,
                                            NavierStokesIntInters,
                                            NavierStokesMPIInters)
 
+# Registers the sup-in-recycle boundary condition
+import pyfr.solvers.navstokes.recycle  # noqa: E402,F401
+
 
 class NavierStokesSystem(BaseAdvectionDiffusionSystem):
     name = 'navier-stokes'
