@@ -103,9 +103,19 @@ class CUDABackend(BaseBackend):
     def xfer_buf(self, shape, dtype):
         nbytes = np.prod(shape)*np.dtype(dtype).itemsize
 
-        # Reallocate if the current buffer is too small
+        # Reallocate if the current buffer is too small, freeing the old one
+        # first; page-locked allocations of a few GB have been seen to fail
+        # transiently (CUDAInvalidValue with tens of GB available), in which
+        # case fall back to pageable memory, which cuMemcpy also accepts
         if self._xfer_buf is None or self._xfer_buf.nbytes < nbytes:
-            self._xfer_buf = self.cuda.pagelocked_empty((nbytes,), np.uint8)
+            from pyfr.backends.cuda.driver import CUDAError
+
+            self._xfer_buf = None
+            try:
+                self._xfer_buf = self.cuda.pagelocked_empty((nbytes,),
+                                                            np.uint8)
+            except CUDAError:
+                self._xfer_buf = np.empty(nbytes, dtype=np.uint8)
 
         # Return a view of the correct shape and dtype
         return self._xfer_buf[:nbytes].view(dtype).reshape(shape)
