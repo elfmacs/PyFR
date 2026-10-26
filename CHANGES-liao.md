@@ -99,3 +99,18 @@
 - 4 层整算例 t=10 解场：只含第 1 项时与 `s_es400` 逐位相同；含第 2 项时相对差 2e-13（舍入，经混沌动力学放大）；
 - level3 熵守恒检验：熵误差、守恒误差仍在 1e-17～1e-15。
 - 第 4、5 项：point、column-mean 面通量与 RHS 与改动前逐位相同，4 层整算例 t=10 逐位相同；第 6 项只改变列平均权重的末位（point 路径不受影响）。
+
+## 六、2026-10-26 合入 `liao`：M2.5 TBL 的生产代码（`idea/tavg-pinned`，含 `idea/recycle`）与 `idea/efcount`
+
+从此运行和修改都在本仓库的 `liao` 上进行（环境：`/home/liaofei/workspace/pyfr/activate_pyfr.sh`，唯一的 venv，以可编辑方式安装本仓库）。原来各个 worktree 都已删除，分支保留。
+
+| 改动 | 文件 / 提交 | 说明 | 状态 |
+|---|---|---|---|
+| 超声速回收入口 `sup-in-recycle` | `navstokes/recycle.py`、`kernels/bcs/sup-in-recycle.mako`、`navstokes/system.py`；`05565bd0`、`c67baae3` | 按回收站重新缩放入口剖面；x-rec 改变时重置平均；日志逐行刷新 | **有效**：M2、M2.5 TBL 正式计算 |
+| tavg 不保留累加量的常驻主机拷贝 | `plugins/soln/tavg.py`；`1e42e55c` | 降低主机内存峰值 | **有效**：M2.5，94 万单元 |
+| 换传输缓冲区前先释放；锁页申请失败时改用普通内存 | `backends/cuda/base.py`；`1d3c3e89` | 锁页申请曾偶发失败 3 次（CUDAInvalidValue） | **有效** |
+| 插件出错时紧急存档 | `integrators/base.py`；`91753c77` | 先让 writer、tavg 做不清零存档，再抛出异常 | **有效** |
+| tavg：启动时就申请好传输缓冲区；trigger_write 前先累加到当前时刻；首次调用时设定上一次采样时刻 | `plugins/soln/tavg.py`；`f9dc265f` | 首次调用的改动与 `fix/tavg-first-window` `4b922079` 相同 | **有效**：续算后第一个窗口的 ⟨1⟩ 由 0.998 变为 1；存档时的 ⟨1⟩ 由 139/140 变为 1 |
+| 熵滤波动作计数插件 `efcount` | `plugins/soln/efcount.py`；`0719ae55` | 每步读导出量 ef-filter，统计被滤波的单元；只看最后一个子步，所以是下限；自身出错不抛异常 | **工具** |
+
+合并前检验：M2.5 正式配置（开只保正熵滤波）从同一快照算 100 步。合并后的 `liao`（`9d647267`）与原生产代码（`idea/tavg-pinned`）的解场、ef-filter 和各日志都逐位相同（`examples_src/tbl/m2.5/tests/unify/compare.txt`）。
