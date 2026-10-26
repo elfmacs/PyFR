@@ -160,6 +160,12 @@ class TavgPlugin(PostactionMixin, RegionMixin, BackendMixin, BaseSolnPlugin):
                 acc_comp=acc_comp, nupts=nupts, neles=neles, tplargs=tplargs
             )
 
+        # Size the host transfer buffer for fetching the accumulators now,
+        # rather than at the first write when memory may be tighter
+        if hasattr(backend, 'xfer_buf'):
+            nbytes = max(d['acc'].nbytes for d in self._tavg_data.values())
+            backend.xfer_buf((nbytes,), np.uint8)
+
     @memoize
     def _get_accum_kerns(self, uidx):
         backend = self.backend
@@ -237,14 +243,37 @@ class TavgPlugin(PostactionMixin, RegionMixin, BackendMixin, BaseSolnPlugin):
         if not self._started:
             return
 
+        # Accumulate up to the current time first; the averages are
+        # normalised by the time since the start of the window, so writing
+        # between accumulation steps would bias them all low by the time
+        # since the last accumulation (and the variances far more)
+        if intg.tcurr > self.prevt:
+            self._accumulate(intg)
+
         data, metadata = self._prepare_data(intg)
         self._writer.write(data, intg.tcurr, metadata, self._async_timeout)
+
+    def _accumulate(self, intg):
+        # Compute gradients on device if needed
+        if self._has_grads:
+            intg.compute_grads()
+
+        # Compute the weight for the trapezoidal rule
+        dt = intg.tcurr - self.prevt
+
+        # Bind the weight and run accumulation kernels
+        kerns = self._get_accum_kerns(intg.idxcurr)
+        for kern in kerns:
+            kern.bind(wdt=dt)
+        self.backend.run_kernels(kerns)
+        self.prevt = intg.tcurr
 
     def __call__(self, intg):
         self._writer.probe()
 
         # If necessary, run the start-up routines
-        if not self._started:
+        firstcall = not self._started
+        if firstcall:
             self._init_accumex(intg)
             self._started = True
 
@@ -252,20 +281,12 @@ class TavgPlugin(PostactionMixin, RegionMixin, BackendMixin, BaseSolnPlugin):
         dowrite = intg.tcurr - self.tout_last >= self.dtout - self.tol
         doaccum = intg.nacptsteps % self._accum_nsteps == 0
 
-        if dowrite or doaccum:
-            # Compute gradients on device if needed
-            if self._has_grads:
-                intg.compute_grads()
-
-            # Compute the weight for the trapezoidal rule
-            dt = intg.tcurr - self.prevt
-
-            # Bind the weight and run accumulation kernels
-            kerns = self._get_accum_kerns(intg.idxcurr)
-            for kern in kerns:
-                kern.bind(wdt=dt)
-            self.backend.run_kernels(kerns)
-            self.prevt = intg.tcurr
+        # On the first call accumulate with a zero weight so that the
+        # trapezoidal rule's previous sample is set; otherwise when
+        # restarting the first interval is integrated against zero
+        # (from 4b922079 on fix/tavg-first-window)
+        if dowrite or doaccum or firstcall:
+            self._accumulate(intg)
 
             if dowrite:
                 # Transfer device data to host and prepare it for output
